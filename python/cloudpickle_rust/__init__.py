@@ -7,7 +7,7 @@ del DYNAMIC_CODE_FILENAME  # noqa: F821
 
 __doc__ = cloudpickle.__doc__
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [  # noqa
     "__version__",

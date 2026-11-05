@@ -160,7 +160,7 @@ situations:
 Compatibility with cloudpickle
 ------------------------------
 
-`cloudpickle-rust` 0.1.0 implements cloudpickle 3.2.0.dev0 (upstream commit
+`cloudpickle-rust` 0.2.0 implements cloudpickle 3.2.0.dev0 (upstream commit
 [`4af5936`](https://github.com/cloudpipe/cloudpickle/commit/4af5936c328de0b33fa9c636e210d9a9e1e97dd3)).
 
 - **Same structure and API.** The package mirrors upstream: `cloudpickle_rust/__init__.py`,

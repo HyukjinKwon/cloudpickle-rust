@@ -1,5 +1,5 @@
-In development
-==============
+0.2.0
+=====
 
 - Add `cloudpickle_rust.cloudpickle.DYNAMIC_CODE_FILENAME`, the `co_filename`
   given to the code pickled by value (`"<dynamic-code>"` by default, as
