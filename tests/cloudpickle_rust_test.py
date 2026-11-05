@@ -752,7 +752,7 @@ def test_functions_match_upstream():
 
     def signature(func):
         text = str(inspect.signature(func))
-        return re.sub(r" at 0x[0-9a-f]+", "", text).replace(
+        return re.sub(r" at 0x[0-9a-fA-F]+", "", text).replace(
             "cloudpickle_rust.", "cloudpickle."
         )
 
