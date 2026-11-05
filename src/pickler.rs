@@ -5,7 +5,7 @@
 //! upstream class statement, with methods implemented in Rust (see
 //! `utils::add_method`).
 
-use pyo3::exceptions::{PyKeyError, PyNameError, PyRecursionError};
+use pyo3::exceptions::{PyKeyError, PyRecursionError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyModule, PyString, PySuper, PyTuple, PyType};
@@ -14,7 +14,7 @@ use crate::lookup::should_pickle_by_reference;
 use crate::reconstructors::make_empty_cell;
 use crate::reducers::{class_reduce, dynamic_class_reduce, function_getstate};
 use crate::state::globals;
-use crate::utils::{add_function, add_method, fastcall_method, raise_from, Params};
+use crate::utils::{add_function, add_method, fastcall_method, module_global, raise_from, Params};
 
 type R<'py> = PyResult<Bound<'py, PyAny>>;
 type Args<'py> = [Option<Bound<'py, PyAny>>];
@@ -31,16 +31,6 @@ fn arg_or_none<'py>(py: Python<'py>, args: &Args<'py>, i: usize) -> Bound<'py, P
 
 fn none(py: Python<'_>) -> Bound<'_, PyAny> {
     py.None().into_bound(py)
-}
-
-/// Value of a global variable of the `cloudpickle_rust.cloudpickle` module,
-/// looked up at call time like in the upstream Python code.
-fn module_global<'py>(py: Python<'py>, name: &Bound<'py, PyString>) -> R<'py> {
-    globals(py)
-        .module_dict
-        .bind(py)
-        .get_item(name)?
-        .ok_or_else(|| PyNameError::new_err(format!("name '{name}' is not defined")))
 }
 
 fn super_of<'py>(slf: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PySuper>> {

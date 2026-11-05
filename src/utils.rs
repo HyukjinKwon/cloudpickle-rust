@@ -9,11 +9,13 @@ use std::ffi::CStr;
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyNameError, PyTypeError, PyValueError};
 use pyo3::ffi;
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyModule, PyString, PyTuple, PyType};
+
+use crate::state::globals;
 
 /// Equivalent of Python's `"".join(s)`.
 ///
@@ -199,6 +201,19 @@ pub(crate) fn set_attr<'py>(
     value: impl IntoPyObject<'py>,
 ) -> PyResult<()> {
     m.setattr(name, value)
+}
+
+/// Value of a global variable of the `cloudpickle_rust.cloudpickle` module,
+/// looked up at call time like in the upstream Python code.
+pub(crate) fn module_global<'py>(
+    py: Python<'py>,
+    name: &Bound<'py, PyString>,
+) -> PyResult<Bound<'py, PyAny>> {
+    globals(py)
+        .module_dict
+        .bind(py)
+        .get_item(name)?
+        .ok_or_else(|| PyNameError::new_err(format!("name '{name}' is not defined")))
 }
 
 /// Register a `#[pyfunction]` in the module under its Python name.

@@ -184,6 +184,11 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     // communication speed over compatibility:
     set_attr(m, "DEFAULT_PROTOCOL", pickle.getattr("HIGHEST_PROTOCOL")?)?;
 
+    // cloudpickle-rust extension, looked up at call time like DEFAULT_PROTOCOL:
+    // the filename given to the code objects pickled by value, or None to keep
+    // their original filename (see code::code_reduce).
+    set_attr(m, "DYNAMIC_CODE_FILENAME", "<dynamic-code>")?;
+
     // Names of modules whose resources should be treated as dynamic.
     let pickle_by_value_modules = PySet::empty(py)?;
     set_attr(m, "_PICKLE_BY_VALUE_MODULES", &pickle_by_value_modules)?;

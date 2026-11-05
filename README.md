@@ -212,6 +212,22 @@ pickled:
   `_make_cell(value=_empty_cell_value)`: the signature of a builtin function
   cannot have a default value which is not a literal.
 
+One extension, which upstream does not have:
+
+- `cloudpickle_rust.cloudpickle.DYNAMIC_CODE_FILENAME` is the `co_filename`
+  given to the code of the functions and classes pickled by value:
+  `"<dynamic-code>"` by default, as upstream since
+  [PR#560](https://github.com/cloudpipe/cloudpickle/pull/560), so that the
+  payloads do not depend on where the code is defined. Set it to `None` to
+  keep the original filenames, as cloudpickle 3.1 and earlier did, so that
+  the tracebacks and the profilers of the processes that load the code show
+  where it was defined. Like `DEFAULT_PROTOCOL`, it is looked up at call time:
+
+  ```python
+  >>> import cloudpickle_rust.cloudpickle
+  >>> cloudpickle_rust.cloudpickle.DYNAMIC_CODE_FILENAME = None
+  ```
+
 
 Performance
 -----------

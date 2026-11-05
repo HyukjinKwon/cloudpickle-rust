@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use pyo3::exceptions::PyIndexError;
+use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -11,7 +11,7 @@ use pyo3::types::{
 };
 
 use crate::state::{globals, GLOBALS};
-use crate::utils::{add_function, fresh_str, py_id};
+use crate::utils::{add_function, fresh_str, module_global, py_id};
 
 /// Names referenced by the global-referencing instructions of `code`
 /// (`LOAD_GLOBAL`, `STORE_GLOBAL` and `DELETE_GLOBAL`), in bytecode order.
@@ -428,6 +428,31 @@ fn py_find_imported_submodules<'py>(
     find_imported_submodules(code, top_level_dependencies.try_iter()?)
 }
 
+/// The `co_filename` given to a code object pickled by value.
+///
+/// cloudpickle-rust extension: the `DYNAMIC_CODE_FILENAME` module attribute,
+/// looked up at call time like `DEFAULT_PROTOCOL`, is `"<dynamic-code>"` by
+/// default as upstream. Setting it to `None` keeps the original filename, as
+/// cloudpickle 3.1 and earlier did, so that the tracebacks and the profilers of
+/// the processes that load the code can show where it was defined.
+fn dynamic_code_filename<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    let filename = module_global(py, intern!(py, "DYNAMIC_CODE_FILENAME"))?;
+    if filename.is_none() {
+        // The original object, as cloudpickle 3.1: code objects defined in the
+        // same file share (and memoize) their filename.
+        obj.getattr(intern!(py, "co_filename"))
+    } else if filename.is_instance_of::<PyString>() {
+        // A new copy for each code object, as `"".join("<dynamic-code>")`.
+        fresh_str(&filename)
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "DYNAMIC_CODE_FILENAME must be a str or None, not {}",
+            filename.get_type().name()?
+        )))
+    }
+}
+
 /// code object reducer.
 pub(crate) fn code_reduce<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     // If you are not sure about the order of arguments, take a look at help
@@ -447,7 +472,7 @@ pub(crate) fn code_reduce<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, P
     // the payload deterministic, independent of where the function is defined
     // which is especially useful when defining classes in jupyter/ipython
     // cells which do not have a deterministic filename.
-    let co_filename = PyString::new(py, "<dynamic-code>").into_any();
+    let co_filename = dynamic_code_filename(obj)?;
 
     // Create shallow copies of these tuple to make cloudpickle payload deterministic.
     // When creating a code object during load, copies of these four tuples are
