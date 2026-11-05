@@ -358,6 +358,7 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
         module_dict: m.dict().unbind(),
         builtin_function_type: m.getattr("_make_function")?.get_type().into_any().unbind(),
         pypy,
+        code_exceptiontable_last: code::measure_code_exceptiontable_last(py)?,
         sys: sys.clone().unbind(),
         builtins: builtins.clone().unbind(),
         builtins_dict: builtins.dict().unbind(),

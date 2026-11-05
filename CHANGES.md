@@ -22,9 +22,10 @@
 - 1.4x to 1.7x faster than cloudpickle to pickle dynamic functions, classes
   and their instances (see `benchmarks/bench.py`).
 
-- Supports PyPy 3.11, on which upstream cloudpickle 3.1.2 / 3.2.0.dev0 cannot
-  be used (it fails at import time because `pickle.Pickler` became a native
-  class without a `dispatch` attribute, and its code objects reducer does not
-  match the signature of PyPy's `types.CodeType`).
+- Supports PyPy 3.11 (PyPy 7.3.20+ and 8.0), on which upstream cloudpickle
+  3.1.2 / 3.2.0.dev0 cannot be used: it fails at import time because
+  `pickle.Pickler` became a native class without a `dispatch` attribute (and
+  its code objects reducer does not match the signature of `types.CodeType`
+  in PyPy 7.3, which differs from the one of CPython and PyPy 8).
 
 - Supports free-threaded CPython builds without re-enabling the GIL.

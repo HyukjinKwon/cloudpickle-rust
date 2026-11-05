@@ -42,7 +42,7 @@ The latest release of `cloudpickle-rust` is available from
 
 Binary wheels are provided for:
 
-| Platform | CPython 3.8 – 3.14 | Free-threaded CPython 3.13t, 3.14t | PyPy 3.11 |
+| Platform | CPython 3.8 – 3.14 | Free-threaded CPython 3.14t | PyPy 3.11 |
 |---|---|---|---|
 | Linux, manylinux (x86_64, aarch64) | ✓ | ✓ | ✓ |
 | Linux, manylinux (x86, armv7, s390x, ppc64le) | ✓ | ✓ | |
@@ -52,8 +52,9 @@ Binary wheels are provided for:
 | Windows (x86) | ✓ | | |
 | Windows (arm64) | 3.11 – 3.14 | ✓ | |
 
-On other platforms, installing from the source distribution requires a Rust
-toolchain.
+On other platforms (and on the free-threaded CPython 3.13t, for which maturin
+does not build wheels since free-threading is experimental in 3.13),
+installing from the source distribution requires a Rust toolchain.
 
 The package is importable as `cloudpickle_rust`, so that it can be installed
 alongside `cloudpickle`. To use it as a drop-in replacement:
@@ -176,12 +177,14 @@ Compatibility with cloudpickle
   `import cloudpickle_rust as cloudpickle`. On CPython 3.8 to 3.14 and
   free-threaded 3.13t and 3.14t, every test has the same outcome (pass, skip
   or expected failure) as with upstream cloudpickle.
-- **PyPy 3.11.** Upstream cloudpickle cannot be imported on PyPy 3.11, whose
-  `pickle.Pickler` became a native class without the `dispatch` attribute that
-  its PyPy implementation relies on (and its reducer of code objects does not
-  match the signature of PyPy's `types.CodeType`). `cloudpickle-rust` uses the
-  pure-Python pickler on PyPy, like upstream did with earlier PyPy versions,
-  and passes the whole test-suite.
+- **PyPy 3.11.** Upstream cloudpickle cannot be imported on PyPy 3.11 (PyPy
+  7.3.20+ and 8.0), whose `pickle.Pickler` became a native class without the
+  `dispatch` attribute that its PyPy implementation relies on (and its reducer
+  of code objects does not match the signature of `types.CodeType` of PyPy
+  7.3). `cloudpickle-rust` uses the pure-Python pickler on PyPy, like upstream
+  did with earlier PyPy versions, detects the signature of `types.CodeType`,
+  and passes the whole test-suite on PyPy 7.3.23 and 8.0.1. On PyPy 8.0.1,
+  with upstream's import fixed, every upstream test has the same outcome.
 
 The few implementation-level differences, which do not change what is
 pickled:

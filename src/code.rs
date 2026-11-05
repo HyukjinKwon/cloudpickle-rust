@@ -122,6 +122,72 @@ pub(crate) fn measure_load_global_shift(
     })
 }
 
+/// Measure the order of the arguments of the `types.CodeType` constructor
+/// (see [`crate::state::Globals::code_exceptiontable_last`]): rebuild the
+/// code object of a probe closure (with free variables, so that a wrong order
+/// cannot produce an equal code object) with both orders.
+pub(crate) fn measure_code_exceptiontable_last<'py>(py: Python<'py>) -> PyResult<bool> {
+    let source = "def outer():\n    x = 1\n    def probe():\n        return x\n    return probe\n";
+    let module_code = py.import("builtins")?.getattr("compile")?.call1((
+        source,
+        "<cloudpickle_rust probe>",
+        "exec",
+    ))?;
+    let code_type = py.import("types")?.getattr("CodeType")?;
+    let find_code = |code: &Bound<'py, PyAny>| -> PyResult<Option<Bound<'py, PyAny>>> {
+        for constant in code.getattr("co_consts")?.try_iter()? {
+            let constant = constant?;
+            if constant.is_instance(&code_type)? {
+                return Ok(Some(constant));
+            }
+        }
+        Ok(None)
+    };
+    let Some(outer) = find_code(&module_code)? else {
+        return Ok(false);
+    };
+    let Some(probe) = find_code(&outer)? else {
+        return Ok(false);
+    };
+    if !probe.hasattr("co_exceptiontable")? {
+        return Ok(false);
+    }
+    let mut args = Vec::new();
+    for name in [
+        "co_argcount",
+        "co_posonlyargcount",
+        "co_kwonlyargcount",
+        "co_nlocals",
+        "co_stacksize",
+        "co_flags",
+        "co_code",
+        "co_consts",
+        "co_names",
+        "co_varnames",
+        "co_filename",
+        "co_name",
+        "co_qualname",
+        "co_firstlineno",
+        "co_linetable",
+    ] {
+        args.push(probe.getattr(name)?);
+    }
+    let rebuilds = |tail: [&str; 3]| -> PyResult<bool> {
+        let mut all_args = args.clone();
+        for name in tail {
+            all_args.push(probe.getattr(name)?);
+        }
+        Ok(match code_type.call1(PyTuple::new(py, all_args)?) {
+            Ok(code) => code.eq(&probe)?,
+            Err(_) => false,
+        })
+    };
+    if rebuilds(["co_exceptiontable", "co_freevars", "co_cellvars"])? {
+        return Ok(false);
+    }
+    rebuilds(["co_freevars", "co_cellvars", "co_exceptiontable"])
+}
+
 #[pyfunction]
 #[pyo3(name = "_walk_global_ops")]
 fn py_walk_global_ops<'py>(code: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
@@ -396,122 +462,123 @@ pub(crate) fn code_reduce<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, P
     let co_freevars = copy(intern!(py, "co_freevars"))?;
     let co_cellvars = copy(intern!(py, "co_cellvars"))?;
 
-    let args: Vec<Bound<'py, PyAny>> = if g.pypy && obj.hasattr(intern!(py, "co_exceptiontable"))? {
-        // PyPy 3.11 and later: same attributes as CPython 3.11, but the
-        // exception table comes after the free and cell variables in the
-        // signature of the constructor:
-        // (..., firstlineno, linetable, freevars, cellvars, exceptiontable)
-        // Upstream uses the CPython order, which PyPy cannot load.
-        vec![
-            attr(intern!(py, "co_argcount"))?,
-            attr(intern!(py, "co_posonlyargcount"))?,
-            attr(intern!(py, "co_kwonlyargcount"))?,
-            attr(intern!(py, "co_nlocals"))?,
-            attr(intern!(py, "co_stacksize"))?,
-            attr(intern!(py, "co_flags"))?,
-            attr(intern!(py, "co_code"))?,
-            attr(intern!(py, "co_consts"))?,
-            co_names,
-            co_varnames,
-            co_filename,
-            co_name,
-            attr(intern!(py, "co_qualname"))?,
-            attr(intern!(py, "co_firstlineno"))?,
-            attr(intern!(py, "co_linetable"))?,
-            co_freevars,
-            co_cellvars,
-            attr(intern!(py, "co_exceptiontable"))?,
-        ]
-    } else if obj.hasattr(intern!(py, "co_exceptiontable"))? {
-        // Python 3.11 and later: there are some new attributes
-        // related to the enhanced exceptions.
-        vec![
-            attr(intern!(py, "co_argcount"))?,
-            attr(intern!(py, "co_posonlyargcount"))?,
-            attr(intern!(py, "co_kwonlyargcount"))?,
-            attr(intern!(py, "co_nlocals"))?,
-            attr(intern!(py, "co_stacksize"))?,
-            attr(intern!(py, "co_flags"))?,
-            attr(intern!(py, "co_code"))?,
-            attr(intern!(py, "co_consts"))?,
-            co_names,
-            co_varnames,
-            co_filename,
-            co_name,
-            attr(intern!(py, "co_qualname"))?,
-            attr(intern!(py, "co_firstlineno"))?,
-            attr(intern!(py, "co_linetable"))?,
-            attr(intern!(py, "co_exceptiontable"))?,
-            co_freevars,
-            co_cellvars,
-        ]
-    } else if obj.hasattr(intern!(py, "co_linetable"))? {
-        // Python 3.10 and later: obj.co_lnotab is deprecated and constructor
-        // expects obj.co_linetable instead.
-        vec![
-            attr(intern!(py, "co_argcount"))?,
-            attr(intern!(py, "co_posonlyargcount"))?,
-            attr(intern!(py, "co_kwonlyargcount"))?,
-            attr(intern!(py, "co_nlocals"))?,
-            attr(intern!(py, "co_stacksize"))?,
-            attr(intern!(py, "co_flags"))?,
-            attr(intern!(py, "co_code"))?,
-            attr(intern!(py, "co_consts"))?,
-            co_names,
-            co_varnames,
-            co_filename,
-            co_name,
-            attr(intern!(py, "co_firstlineno"))?,
-            attr(intern!(py, "co_linetable"))?,
-            co_freevars,
-            co_cellvars,
-        ]
-    } else if obj.hasattr(intern!(py, "co_nmeta"))? {
-        // "nogil" Python: modified attributes from 3.9
-        vec![
-            attr(intern!(py, "co_argcount"))?,
-            attr(intern!(py, "co_posonlyargcount"))?,
-            attr(intern!(py, "co_kwonlyargcount"))?,
-            attr(intern!(py, "co_nlocals"))?,
-            attr(intern!(py, "co_framesize"))?,
-            attr(intern!(py, "co_ndefaultargs"))?,
-            attr(intern!(py, "co_nmeta"))?,
-            attr(intern!(py, "co_flags"))?,
-            attr(intern!(py, "co_code"))?,
-            attr(intern!(py, "co_consts"))?,
-            co_varnames,
-            co_filename,
-            co_name,
-            attr(intern!(py, "co_firstlineno"))?,
-            attr(intern!(py, "co_lnotab"))?,
-            attr(intern!(py, "co_exc_handlers"))?,
-            attr(intern!(py, "co_jump_table"))?,
-            co_freevars,
-            co_cellvars,
-            attr(intern!(py, "co_free2reg"))?,
-            attr(intern!(py, "co_cell2reg"))?,
-        ]
-    } else {
-        // Backward compat for 3.8 and 3.9
-        vec![
-            attr(intern!(py, "co_argcount"))?,
-            attr(intern!(py, "co_posonlyargcount"))?,
-            attr(intern!(py, "co_kwonlyargcount"))?,
-            attr(intern!(py, "co_nlocals"))?,
-            attr(intern!(py, "co_stacksize"))?,
-            attr(intern!(py, "co_flags"))?,
-            attr(intern!(py, "co_code"))?,
-            attr(intern!(py, "co_consts"))?,
-            co_names,
-            co_varnames,
-            co_filename,
-            co_name,
-            attr(intern!(py, "co_firstlineno"))?,
-            attr(intern!(py, "co_lnotab"))?,
-            co_freevars,
-            co_cellvars,
-        ]
-    };
+    let args: Vec<Bound<'py, PyAny>> =
+        if g.code_exceptiontable_last && obj.hasattr(intern!(py, "co_exceptiontable"))? {
+            // PyPy 7.3 for Python 3.11: same attributes as CPython 3.11, but the
+            // exception table comes after the free and cell variables in the
+            // signature of the constructor:
+            // (..., firstlineno, linetable, freevars, cellvars, exceptiontable)
+            // Upstream uses the CPython order, which this PyPy cannot load.
+            vec![
+                attr(intern!(py, "co_argcount"))?,
+                attr(intern!(py, "co_posonlyargcount"))?,
+                attr(intern!(py, "co_kwonlyargcount"))?,
+                attr(intern!(py, "co_nlocals"))?,
+                attr(intern!(py, "co_stacksize"))?,
+                attr(intern!(py, "co_flags"))?,
+                attr(intern!(py, "co_code"))?,
+                attr(intern!(py, "co_consts"))?,
+                co_names,
+                co_varnames,
+                co_filename,
+                co_name,
+                attr(intern!(py, "co_qualname"))?,
+                attr(intern!(py, "co_firstlineno"))?,
+                attr(intern!(py, "co_linetable"))?,
+                co_freevars,
+                co_cellvars,
+                attr(intern!(py, "co_exceptiontable"))?,
+            ]
+        } else if obj.hasattr(intern!(py, "co_exceptiontable"))? {
+            // Python 3.11 and later: there are some new attributes
+            // related to the enhanced exceptions.
+            vec![
+                attr(intern!(py, "co_argcount"))?,
+                attr(intern!(py, "co_posonlyargcount"))?,
+                attr(intern!(py, "co_kwonlyargcount"))?,
+                attr(intern!(py, "co_nlocals"))?,
+                attr(intern!(py, "co_stacksize"))?,
+                attr(intern!(py, "co_flags"))?,
+                attr(intern!(py, "co_code"))?,
+                attr(intern!(py, "co_consts"))?,
+                co_names,
+                co_varnames,
+                co_filename,
+                co_name,
+                attr(intern!(py, "co_qualname"))?,
+                attr(intern!(py, "co_firstlineno"))?,
+                attr(intern!(py, "co_linetable"))?,
+                attr(intern!(py, "co_exceptiontable"))?,
+                co_freevars,
+                co_cellvars,
+            ]
+        } else if obj.hasattr(intern!(py, "co_linetable"))? {
+            // Python 3.10 and later: obj.co_lnotab is deprecated and constructor
+            // expects obj.co_linetable instead.
+            vec![
+                attr(intern!(py, "co_argcount"))?,
+                attr(intern!(py, "co_posonlyargcount"))?,
+                attr(intern!(py, "co_kwonlyargcount"))?,
+                attr(intern!(py, "co_nlocals"))?,
+                attr(intern!(py, "co_stacksize"))?,
+                attr(intern!(py, "co_flags"))?,
+                attr(intern!(py, "co_code"))?,
+                attr(intern!(py, "co_consts"))?,
+                co_names,
+                co_varnames,
+                co_filename,
+                co_name,
+                attr(intern!(py, "co_firstlineno"))?,
+                attr(intern!(py, "co_linetable"))?,
+                co_freevars,
+                co_cellvars,
+            ]
+        } else if obj.hasattr(intern!(py, "co_nmeta"))? {
+            // "nogil" Python: modified attributes from 3.9
+            vec![
+                attr(intern!(py, "co_argcount"))?,
+                attr(intern!(py, "co_posonlyargcount"))?,
+                attr(intern!(py, "co_kwonlyargcount"))?,
+                attr(intern!(py, "co_nlocals"))?,
+                attr(intern!(py, "co_framesize"))?,
+                attr(intern!(py, "co_ndefaultargs"))?,
+                attr(intern!(py, "co_nmeta"))?,
+                attr(intern!(py, "co_flags"))?,
+                attr(intern!(py, "co_code"))?,
+                attr(intern!(py, "co_consts"))?,
+                co_varnames,
+                co_filename,
+                co_name,
+                attr(intern!(py, "co_firstlineno"))?,
+                attr(intern!(py, "co_lnotab"))?,
+                attr(intern!(py, "co_exc_handlers"))?,
+                attr(intern!(py, "co_jump_table"))?,
+                co_freevars,
+                co_cellvars,
+                attr(intern!(py, "co_free2reg"))?,
+                attr(intern!(py, "co_cell2reg"))?,
+            ]
+        } else {
+            // Backward compat for 3.8 and 3.9
+            vec![
+                attr(intern!(py, "co_argcount"))?,
+                attr(intern!(py, "co_posonlyargcount"))?,
+                attr(intern!(py, "co_kwonlyargcount"))?,
+                attr(intern!(py, "co_nlocals"))?,
+                attr(intern!(py, "co_stacksize"))?,
+                attr(intern!(py, "co_flags"))?,
+                attr(intern!(py, "co_code"))?,
+                attr(intern!(py, "co_consts"))?,
+                co_names,
+                co_varnames,
+                co_filename,
+                co_name,
+                attr(intern!(py, "co_firstlineno"))?,
+                attr(intern!(py, "co_lnotab"))?,
+                co_freevars,
+                co_cellvars,
+            ]
+        };
     Ok((g.code_type.bind(py), PyTuple::new(py, args)?)
         .into_pyobject(py)?
         .into_any())

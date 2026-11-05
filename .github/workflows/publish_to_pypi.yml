@@ -14,16 +14,18 @@ permissions:
   contents: read
 
 env:
-  # The free-threaded interpreters are not selected by --find-interpreter.
-  # (--find-interpreter honors requires-python, which excludes the CPython
-  # versions not supported by PyO3 0.28, and the versions of PyPy supported by
-  # PyO3.)
-  FREE_THREADED_INTERPRETERS: python3.13t python3.14t
+  # The free-threaded interpreters are not selected by --find-interpreter
+  # (which honors requires-python, excluding the CPython versions not supported
+  # by PyO3 0.28, and the versions of PyPy supported by PyO3). maturin only
+  # builds free-threaded wheels for Python 3.14 and later: on 3.13t (where
+  # free-threading is experimental), cloudpickle-rust is built from source.
+  FREE_THREADED_INTERPRETERS: python3.14t
 
 jobs:
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: ubuntu-22.04
@@ -65,6 +67,7 @@ jobs:
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: ubuntu-22.04
@@ -102,6 +105,7 @@ jobs:
   windows:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: windows-latest
@@ -153,13 +157,6 @@ jobs:
           # versions supported by PyO3 0.28.
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      - name: Set up free-threaded Python 3.13
-        if: ${{ matrix.platform.free_threaded }}
-        id: python313t
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.13t
-          architecture: ${{ matrix.platform.python_arch }}
       - name: Set up free-threaded Python 3.14
         if: ${{ matrix.platform.free_threaded }}
         id: python314t
@@ -172,9 +169,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: >-
-            --release --out dist
-            -i ${{ steps.python313t.outputs.python-path }} ${{ steps.python314t.outputs.python-path }}
+          args: --release --out dist -i ${{ steps.python314t.outputs.python-path }}
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
         uses: actions/upload-artifact@v6
@@ -185,6 +180,7 @@ jobs:
   macos:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: macos-15-intel
@@ -202,7 +198,7 @@ jobs:
         # setup-python does not provide all the versions (e.g. CPython 3.8)
         # on arm64 macOS runners: use uv's builds for all of them instead.
         run: |
-          versions="3.8 3.9 3.10 3.11 3.12 3.13 3.14 3.13t 3.14t pypy3.11"
+          versions="3.8 3.9 3.10 3.11 3.12 3.13 3.14 3.14t pypy3.11"
           uv python install $versions
           paths=""
           for version in $versions; do

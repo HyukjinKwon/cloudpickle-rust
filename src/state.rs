@@ -38,6 +38,10 @@ pub(crate) struct Globals {
 
     /// Running on PyPy (`PYPY` in upstream).
     pub pypy: bool,
+    /// Whether `types.CodeType` takes the exception table after the free and
+    /// cell variables (PyPy 7.3 for Python 3.11) rather than before them like
+    /// CPython 3.11+ (and PyPy 8). Measured when the module is imported.
+    pub code_exceptiontable_last: bool,
 
     // Standard library modules. Upstream accesses functions of these modules
     // (`uuid.uuid4`, `io.BytesIO`, `logging.getLogger`, ...) as attributes at
