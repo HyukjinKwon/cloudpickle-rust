@@ -214,3 +214,5 @@ python/cloudpickle_rust/__init__.py
 python/cloudpickle_rust/cloudpickle_fast.py
 tests/ (the cloudpickle test-suite, except tests/cloudpickle_rust_test.py)
 ci/install_coverage_subprocess_pth.py
+src/upstream/cloudpickle.py (a copy of cloudpickle/cloudpickle.py)
+src/upstream_docs.rs (the docstrings of cloudpickle/cloudpickle.py)

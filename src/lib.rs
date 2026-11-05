@@ -10,14 +10,19 @@
 //!   `_find_imported_submodules`) and `_code_reduce`;
 //! * [`reducers`]: the reducers and state getters;
 //! * [`reconstructors`]: the functions called at unpickling time;
-//! * [`pickler`]: the `Pickler` class, `dump` and `dumps`.
+//! * [`pickler`]: the `Pickler` class, `dump` and `dumps`;
+//! * [`fallback`]: the call-time semantics of the globals of the module
+//!   (replaced globals make the functions run upstream's code).
 
 mod code;
+mod fallback;
+mod functions;
 mod lookup;
 mod pickler;
 mod reconstructors;
 mod reducers;
 mod state;
+mod upstream_docs;
 mod utils;
 
 use pyo3::prelude::*;
@@ -83,6 +88,16 @@ LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 "#;
+
+/// Upstream's definition of the sentinel class (whose instance replaces it,
+/// as upstream's `@instance` decorator does).
+const EMPTY_CELL_VALUE_CLASS: &std::ffi::CStr = c"class _empty_cell_value:
+    \"\"\"Sentinel for empty closures.\"\"\"
+
+    @classmethod
+    def __reduce__(cls):
+        return cls.__name__
+";
 
 #[pymodule(gil_used = false)]
 #[pyo3(name = "cloudpickle")]
@@ -218,7 +233,7 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     };
     set_attr(m, "builtin_code_type", &builtin_code_type)?;
 
-    let code_globals_cache = PyDict::new(py);
+    let code_globals_cache = weakref.getattr("WeakKeyDictionary")?.call0()?;
     set_attr(m, "_extract_code_globals_cache", &code_globals_cache)?;
 
     lookup::register(m)?;
@@ -264,7 +279,12 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     }
 
     reconstructors::register(m)?;
-    let empty_cell_value = Bound::new(py, reconstructors::EmptyCellValue)?.into_any();
+    // `_empty_cell_value` is an instance of a Python class, like upstream's
+    // (whose class statement is executed in the namespace of the module).
+    py.run(EMPTY_CELL_VALUE_CLASS, Some(&m.dict()), None)?;
+    let empty_cell_value = m
+        .getattr("instance")?
+        .call1((m.getattr("_empty_cell_value")?,))?;
     set_attr(m, "_empty_cell_value", &empty_cell_value)?;
 
     reducers::register(m)?;
@@ -280,6 +300,13 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
         dataclass_sentinels.set_item(sentinel.getattr("name")?, &sentinel)?;
     }
     set_attr(m, "_DATACLASSE_FIELD_TYPE_SENTINELS", &dataclass_sentinels)?;
+
+    // Shorthands similar to pickle.dump/pickle.dumps
+    pickler::register(m)?;
+
+    // The functions of the module become Python functions (calling their
+    // Rust implementation), like upstream's.
+    functions::install(m)?;
 
     // set of reducers defined and used by cloudpickle (private)
     let f = |name: &str| m.getattr(name);
@@ -350,9 +377,6 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     set_attr(m, "_DispatchTable", &dispatch_table_type)?;
     set_attr(m, "Pickler", &pickler_type)?;
 
-    // Shorthands similar to pickle.dump/pickle.dumps
-    pickler::register(m)?;
-
     // Include pickles unloading functions in this namespace for convenience.
     set_attr(m, "load", pickle.getattr("load")?)?;
     set_attr(m, "loads", pickle.getattr("loads")?)?;
@@ -360,12 +384,46 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     // Backward compat alias.
     set_attr(m, "CloudPickler", &pickler_type)?;
 
+    // The values of the globals read by the upstream functions (see
+    // `fallback`): the namespace of the module is complete.
+    fallback::resolve_all(py, &m.dict())?;
+
+    let function_type = types.getattr("FunctionType")?;
+    let module_name = m.name()?;
+    let mut module_functions = std::collections::HashMap::new();
+    for (name, value) in m.dict().iter() {
+        if value.get_type().is(&function_type) && value.getattr("__module__")?.eq(&module_name)? {
+            module_functions.insert(
+                value.as_ptr() as usize,
+                (value.unbind(), name.cast_into::<PyString>()?.unbind()),
+            );
+        }
+    }
+    let weak_key_dictionary = weakref.getattr("WeakKeyDictionary")?;
+
     let unbind = |name: &str| -> PyResult<Py<PyAny>> { Ok(m.getattr(name)?.unbind()) };
     Ok(Globals {
         version,
         module: m.clone().unbind(),
         module_dict: m.dict().unbind(),
-        builtin_function_type: m.getattr("_make_function")?.get_type().into_any().unbind(),
+        module_functions,
+        pickler_function_reduce: pickler_type
+            .getattr("__dict__")?
+            .get_item("_function_reduce")?
+            .unbind(),
+        pickler_dynamic_function_reduce: pickler_type
+            .getattr("__dict__")?
+            .get_item("_dynamic_function_reduce")?
+            .unbind(),
+        pickler_function_getnewargs: pickler_type
+            .getattr("__dict__")?
+            .get_item("_function_getnewargs")?
+            .unbind(),
+        weak_key_dictionary: (
+            weak_key_dictionary.clone().unbind(),
+            weak_key_dictionary.getattr("get")?.unbind(),
+            weak_key_dictionary.getattr("__setitem__")?.unbind(),
+        ),
         pypy,
         code_exceptiontable_last: code::measure_code_exceptiontable_last(py)?,
         sys: sys.clone().unbind(),
@@ -373,7 +431,6 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
         builtins_dict: builtins.dict().unbind(),
         types_module: types.clone().unbind(),
         abc_module: abc.clone().unbind(),
-        io_module: io.clone().unbind(),
         logging_module: logging.clone().unbind(),
         typing_module: typing.clone().unbind(),
         uuid_module: uuid.clone().unbind(),
@@ -397,6 +454,7 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
             .getattr("PicklingError")?
             .cast_into::<PyType>()?
             .unbind(),
+        struct_pack: r#struct.getattr("pack")?.unbind(),
         builtin_code_type: builtin_code_type.unbind(),
         pickle_by_value_modules: pickle_by_value_modules.unbind(),
         tracker_by_class: tracker_by_class.unbind(),
