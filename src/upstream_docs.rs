@@ -1,7 +1,8 @@
 //! The docstrings of upstream's functions and of the methods of its
-//! `Pickler` class, verbatim (generated from `src/upstream/cloudpickle.py`,
-//! checked by `tests/cloudpickle_rust_test.py`). They are the values of the
-//! docstring literals: the compiler of Python 3.13 and later also strips their
+//! `Pickler` class, verbatim (generated from `src/upstream/cloudpickle.py`
+//! by `dev/generate_upstream_docs.py`, checked by
+//! `tests/cloudpickle_rust_test.py`). They are the values of the docstring
+//! literals: the compiler of Python 3.13 and later also strips their
 //! indentation, see `functions::compiled_doc`.
 
 /// `(name, docstring)` of the functions of the module.
