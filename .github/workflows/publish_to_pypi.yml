@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Build wheels (native images)
+      - name: Build wheels (native manylinux2014 images)
         if: ${{ matrix.platform.native }}
         uses: PyO3/maturin-action@v1
         with:
@@ -77,19 +77,31 @@ jobs:
           before-script-linux: |
             curl -LsSf https://astral.sh/uv/install.sh | sh
             export PATH="$HOME/.local/bin:$PATH"
-            uv python install 3.8 ${{ env.PYPY_80_VERSION }}
+            uv python install 3.8
             mkdir -p /opt/uv-python
-            for spec in "python3.8 3.8" "pypy3.11-pp80 ${{ env.PYPY_80_VERSION }}"; do
-              set -- $spec
-              printf '#!/bin/sh\nexec "%s" "$@"\n' "$(uv python find --managed-python "$2")" > "/opt/uv-python/$1"
-              chmod +x "/opt/uv-python/$1"
-            done
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$(uv python find --managed-python 3.8)" > /opt/uv-python/python3.8
+            chmod +x /opt/uv-python/python3.8
           args: >-
             --release --out dist -i
             /opt/uv-python/python3.8
             ${{ env.MANYLINUX_CPYTHON }}
             /opt/python/pp311-pypy311_pp73/bin/python
-            /opt/uv-python/pypy3.11-pp80
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Build PyPy 8.0 wheels (native manylinux_2_28 images)
+        # The Linux builds of PyPy 8.0 require glibc 2.27 or later.
+        if: ${{ matrix.platform.native }}
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: "2_28"
+          before-script-linux: |
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+            uv python install ${{ env.PYPY_80_VERSION }}
+            mkdir -p /opt/uv-python
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$(uv python find --managed-python ${{ env.PYPY_80_VERSION }})" > /opt/uv-python/pypy3.11-pp80
+            chmod +x /opt/uv-python/pypy3.11-pp80
+          args: --release --out dist -i /opt/uv-python/pypy3.11-pp80
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Build wheels (pypa i686 image)
         if: ${{ matrix.platform.pypa }}

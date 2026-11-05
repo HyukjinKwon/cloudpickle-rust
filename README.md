@@ -44,7 +44,7 @@ Binary wheels are provided for:
 
 | Platform | CPython 3.8 – 3.14 | Free-threaded CPython 3.14t | PyPy 3.11 (7.3, 8.0) |
 |---|---|---|---|
-| Linux, manylinux (x86_64, aarch64) | ✓ | ✓ | ✓ |
+| Linux, manylinux (x86_64, aarch64) | ✓ | ✓ | ✓ (PyPy 8.0: manylinux_2_28) |
 | Linux, manylinux (x86) | 3.9 – 3.14 | ✓ | |
 | Linux, manylinux (armv7, s390x, ppc64le) | ✓ | ✓ | |
 | Linux, musllinux (x86_64, x86, aarch64, armv7) | ✓ | ✓ | |
