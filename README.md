@@ -42,10 +42,11 @@ The latest release of `cloudpickle-rust` is available from
 
 Binary wheels are provided for:
 
-| Platform | CPython 3.8 – 3.14 | Free-threaded CPython 3.14t | PyPy 3.11 |
+| Platform | CPython 3.8 – 3.14 | Free-threaded CPython 3.14t | PyPy 3.11 (7.3, 8.0) |
 |---|---|---|---|
 | Linux, manylinux (x86_64, aarch64) | ✓ | ✓ | ✓ |
-| Linux, manylinux (x86, armv7, s390x, ppc64le) | ✓ | ✓ | |
+| Linux, manylinux (x86) | 3.9 – 3.14 | ✓ | |
+| Linux, manylinux (armv7, s390x, ppc64le) | ✓ | ✓ | |
 | Linux, musllinux (x86_64, x86, aarch64, armv7) | ✓ | ✓ | |
 | macOS (x86_64, arm64) | ✓ | ✓ | ✓ |
 | Windows (x64) | ✓ | ✓ | |
@@ -276,15 +277,13 @@ Releasing to PyPI
 The [`publish_to_pypi.yml`](.github/workflows/publish_to_pypi.yml) GitHub
 Actions workflow builds the wheels of all the supported platforms and Python
 versions (with [maturin-action](https://github.com/PyO3/maturin-action)) and the
-source distribution on every push. When a tag is pushed, it publishes them to
-PyPI using [trusted publishing](https://docs.pypi.org/trusted-publishers/):
+source distribution, and tests the wheels, on every push. When a tag is pushed,
+it publishes them to PyPI with the PyPI API token stored in the `PYPI_TOKEN`
+secret of the repository:
 
-1. Configure a trusted publisher for the `cloudpickle-rust` project on PyPI
-   (for a first release, a "pending publisher"), with the GitHub repository,
-   the `publish_to_pypi.yml` workflow and the `pypi` environment.
-2. Bump the version in `Cargo.toml` and `python/cloudpickle_rust/__init__.py`,
+1. Bump the version in `Cargo.toml` and `python/cloudpickle_rust/__init__.py`,
    and add an entry to `CHANGES.md`.
-3. Push a tag, for instance `git tag v0.1.0 && git push origin v0.1.0`.
+2. Push a tag, for instance `git tag v0.1.0 && git push origin v0.1.0`.
 
 To build the distributions locally instead:
 
