@@ -1,3 +1,12 @@
+In development
+==============
+
+- Add `cloudpickle_rust.cloudpickle.DYNAMIC_CODE_FILENAME`, the `co_filename`
+  given to the code pickled by value (`"<dynamic-code>"` by default, as
+  upstream). Setting it to `None` keeps the original filenames, as cloudpickle
+  3.1 and earlier did, for the tracebacks and the profilers of the processes
+  that load the code, for instance the Python UDFs of Apache Spark.
+
 0.1.0
 =====
 

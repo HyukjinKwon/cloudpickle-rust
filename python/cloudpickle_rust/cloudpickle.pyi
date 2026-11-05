@@ -26,6 +26,9 @@ _BufferCallback = Optional[Callable[[pickle.PickleBuffer], Any]]
 _Reduced = Union[str, Tuple[Any, ...]]
 
 DEFAULT_PROTOCOL: int
+# cloudpickle-rust extension: the co_filename of the code pickled by value, or
+# None to keep the original filename.
+DYNAMIC_CODE_FILENAME: Optional[str]
 PYPY: bool
 builtin_code_type: Optional[type]
 CellType = types.CellType

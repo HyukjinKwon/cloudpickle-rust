@@ -146,7 +146,9 @@ def test_module_namespace_matches_upstream():
     # __warningregistry__ is created when a warning is emitted by the module.
     lazy = {"__warningregistry__"}
     upstream_names = set(vars(cloudpickle.cloudpickle)) - {"__cached__"} - lazy
-    rust_names = set(vars(cloudpickle_rust.cloudpickle)) - {"_DispatchTable"} - lazy
+    # DYNAMIC_CODE_FILENAME is an extension of cloudpickle-rust.
+    extensions = {"_DispatchTable", "DYNAMIC_CODE_FILENAME"}
+    rust_names = set(vars(cloudpickle_rust.cloudpickle)) - extensions - lazy
     assert upstream_names == rust_names
     assert set(vars(cloudpickle)) == set(vars(cloudpickle_rust))
     assert cloudpickle.__all__ == cloudpickle_rust.__all__
@@ -273,6 +275,67 @@ def test_payloads_identical_to_upstream(protocol):
         payload = cloudpickle_rust.dumps(obj, protocol=protocol)
         assert _normalized_opcodes(payload) == expected, obj
         pickle.loads(payload)
+
+
+def _function_with_nested_code():
+    def outer(x):
+        def inner(y):
+            return y + x
+
+        return [inner(i) for i in range(x)]
+
+    return outer
+
+
+def _code_objects(func):
+    """The code of func and the code objects that it contains."""
+    codes = []
+    stack = [func.__code__]
+    while stack:
+        code = stack.pop()
+        codes.append(code)
+        stack.extend(c for c in code.co_consts if isinstance(c, types.CodeType))
+    return codes
+
+
+def test_dynamic_code_filename_default():
+    assert cloudpickle_rust.cloudpickle.DYNAMIC_CODE_FILENAME == "<dynamic-code>"
+    # Only the module attribute is looked up, the package does not expose a copy.
+    assert not hasattr(cloudpickle_rust, "DYNAMIC_CODE_FILENAME")
+    outer = pickle.loads(cloudpickle_rust.dumps(_function_with_nested_code()))
+    assert {c.co_filename for c in _code_objects(outer)} == {"<dynamic-code>"}
+    assert outer(2) == [2, 3]
+
+
+def test_dynamic_code_filename_none_keeps_the_filename(monkeypatch):
+    monkeypatch.setattr(cloudpickle_rust.cloudpickle, "DYNAMIC_CODE_FILENAME", None)
+    func = _function_with_nested_code()
+    filename = func.__code__.co_filename
+    outer = pickle.loads(cloudpickle_rust.dumps(func))
+    codes = _code_objects(outer)
+    assert len(codes) > 1
+    assert {c.co_filename for c in codes} == {filename}
+    assert outer(2) == [2, 3]
+    if all(c.co_filename is filename for c in _code_objects(func)):
+        # As in cloudpickle 3.1, code objects that share their filename still
+        # share it once unpickled: it is pickled once.
+        assert all(c.co_filename is codes[0].co_filename for c in codes)
+    for obj in _parity_objects():
+        pickle.loads(cloudpickle_rust.dumps(obj))
+
+
+def test_dynamic_code_filename_custom(monkeypatch):
+    monkeypatch.setattr(
+        cloudpickle_rust.cloudpickle, "DYNAMIC_CODE_FILENAME", "<remote>"
+    )
+    outer = pickle.loads(cloudpickle_rust.dumps(_function_with_nested_code()))
+    assert {c.co_filename for c in _code_objects(outer)} == {"<remote>"}
+
+
+def test_dynamic_code_filename_must_be_a_str_or_none(monkeypatch):
+    monkeypatch.setattr(cloudpickle_rust.cloudpickle, "DYNAMIC_CODE_FILENAME", 1)
+    with pytest.raises(TypeError, match="must be a str or None, not int"):
+        cloudpickle_rust.dumps(_function_with_nested_code())
 
 
 def test_pickler_methods_accept_keyword_arguments():
