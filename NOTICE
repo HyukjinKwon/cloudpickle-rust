@@ -1,0 +1,14 @@
+cloudpickle-rust
+Copyright 2026 The cloudpickle-rust developers
+
+This product includes software derived from cloudpickle
+(https://github.com/cloudpipe/cloudpickle), distributed under the BSD 3-Clause
+License (see licenses/LICENSE-cloudpickle.txt), with the following notices:
+
+    This module was extracted from the `cloud` package, developed by
+    PiCloud, Inc.
+
+    Copyright (c) 2015, Cloudpickle contributors.
+    Copyright (c) 2012, Regents of the University of California.
+    Copyright (c) 2009 PiCloud, Inc. http://www.picloud.com.
+    All rights reserved.

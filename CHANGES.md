@@ -29,3 +29,7 @@
   in PyPy 7.3, which differs from the one of CPython and PyPy 8).
 
 - Supports free-threaded CPython builds without re-enabling the GIL.
+
+- Licensed under the Apache License, Version 2.0. The code derived from
+  cloudpickle and the files copied from it keep their BSD 3-Clause license
+  notice (see `licenses/LICENSE-cloudpickle.txt` and `NOTICE`).

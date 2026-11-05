@@ -309,3 +309,14 @@ further notably with the help of a dedicated non-regression test suite.
 
 `cloudpickle-rust` is a Rust implementation of `cloudpickle`, which retains
 its test-suite.
+
+
+License
+-------
+
+`cloudpickle-rust` is licensed under the [Apache License, Version 2.0](LICENSE).
+
+It is derived from `cloudpickle`, which is distributed under the
+[BSD 3-Clause License](licenses/LICENSE-cloudpickle.txt): the code derived from
+it and the files copied from it (listed at the end of [LICENSE](LICENSE)) keep
+its copyright and license notice (see also [NOTICE](NOTICE)).

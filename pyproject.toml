@@ -10,8 +10,9 @@ authors = [
 ]
 readme = "README.md"
 requires-python = ">=3.8,<3.15"
-license = "BSD-3-Clause"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+# The code derived from cloudpickle keeps its BSD 3-Clause notice.
+license-files = ["LICENSE", "NOTICE", "licenses/*"]
 dynamic = ["version"]
 keywords = ["pickle", "serialization", "cloudpickle", "distributed computing", "rust"]
 classifiers = [
@@ -51,6 +52,8 @@ python-source = "python"
 strip = true
 include = [
     { path = "LICENSE", format = "sdist" },
+    { path = "NOTICE", format = "sdist" },
+    { path = "licenses/*", format = "sdist" },
     { path = "CHANGES.md", format = "sdist" },
     { path = "dev-requirements.txt", format = "sdist" },
     { path = "tox.ini", format = "sdist" },

@@ -45,10 +45,14 @@ particular, it is not meant to be used for long term storage of Python objects.
 It does not include an unpickler, as standard Python unpickling suffices.
 
 This module is a Rust implementation (cloudpickle-rust) of the cloudpickle
-module, which was extracted from the `cloud` package, developed by `PiCloud, Inc.
-<https://web.archive.org/web/20140626004012/http://www.picloud.com/>`_.
+module. cloudpickle-rust is licensed under the Apache License, Version 2.0 (see
+the LICENSE and NOTICE files of the distribution).
 
-Copyright (c) 2026-now, cloudpickle-rust developers and contributors.
+cloudpickle-rust is derived from cloudpickle, which was extracted from the
+`cloud` package, developed by `PiCloud, Inc.
+<https://web.archive.org/web/20140626004012/http://www.picloud.com/>`_, and is
+distributed under the following license:
+
 Copyright (c) 2012-now, CloudPickle developers and contributors.
 Copyright (c) 2012, Regents of the University of California.
 Copyright (c) 2009 `PiCloud, Inc. <https://web.archive.org/web/20140626004012/http://www.picloud.com/>`_.
