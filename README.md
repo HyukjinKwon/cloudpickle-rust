@@ -1,6 +1,7 @@
 # cloudpickle-rust
 
 [![Automated Tests](https://github.com/HyukjinKwon/cloudpickle-rust/actions/workflows/testing.yml/badge.svg?branch=main&event=push)](https://github.com/HyukjinKwon/cloudpickle-rust/actions/workflows/testing.yml)
+[![codecov.io](https://codecov.io/github/HyukjinKwon/cloudpickle-rust/coverage.svg?branch=main)](https://codecov.io/github/HyukjinKwon/cloudpickle-rust?branch=main)
 [![PyPI](https://img.shields.io/pypi/v/cloudpickle-rust.svg)](https://pypi.org/project/cloudpickle-rust/)
 
 `cloudpickle-rust` is a Rust implementation of
@@ -269,6 +270,46 @@ Running the tests
 
 A Rust toolchain ([rustup](https://rustup.rs)) is required to build the
 extension module. During development, `maturin develop` rebuilds it in place.
+
+
+Test coverage
+-------------
+
+The `coverage` job of the [`testing.yml`](.github/workflows/testing.yml)
+workflow measures the coverage of the test-suite with every supported version
+of Python and PyPy (on Linux), as the Rust code has version-specific code
+paths, and uploads the reports to
+[Codecov](https://codecov.io/github/HyukjinKwon/cloudpickle-rust), which merges
+them. Each job also writes its coverage in its summary and uploads its HTML
+reports as an artifact (`coverage-report-<Python version>`).
+
+- The coverage of the Rust code (the implementation) is measured with
+  [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (LLVM
+  source-based code coverage) on an instrumented build of the extension
+  module, in the pytest process and in the Python subprocesses started by the
+  tests.
+- The coverage of the Python code is measured with
+  [coverage.py](https://coverage.readthedocs.io), in subprocesses as well (as
+  in upstream cloudpickle).
+
+To measure it locally:
+
+    rustup component add llvm-tools-preview
+    cargo install cargo-llvm-cov
+    eval "$(cargo llvm-cov show-env --sh)"
+    cargo llvm-cov clean --workspace
+    MATURIN_PEP517_ARGS="--profile dev" pip install -e .
+    pip install -r dev-requirements.txt
+    python ci/install_coverage_subprocess_pth.py
+    COVERAGE_PROCESS_START=$PWD/.coveragerc PYTHONPATH='.:tests' pytest
+    cargo llvm-cov report --html  # target/llvm-cov/html/index.html
+    coverage combine --append && coverage html  # htmlcov/index.html
+
+`cargo llvm-cov show-env` sets the environment variables (in the current
+shell) with which cargo builds an instrumented extension module, and with which
+the instrumented extension module writes its profile data where
+`cargo llvm-cov report` reads it. Run `pip install -e .` in a shell without
+them to go back to a regular build.
 
 
 Releasing to PyPI

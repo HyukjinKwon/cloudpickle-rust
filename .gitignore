@@ -53,6 +53,11 @@ nosetests.xml
 coverage.xml
 *,cover
 .pytest_cache
+# Coverage of the Rust code (cargo-llvm-cov)
+*.profraw
+*.profdata
+*.lcov
+/coverage-report/
 
 # Translations
 *.mo
