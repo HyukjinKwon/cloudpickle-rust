@@ -316,9 +316,11 @@ def test_dynamic_code_filename_none_keeps_the_filename(monkeypatch):
     assert len(codes) > 1
     assert {c.co_filename for c in codes} == {filename}
     assert outer(2) == [2, 3]
-    if all(c.co_filename is filename for c in _code_objects(func)):
+    shared = all(c.co_filename is filename for c in _code_objects(func))
+    if shared and sys.implementation.name == "cpython":
         # As in cloudpickle 3.1, code objects that share their filename still
-        # share it once unpickled: it is pickled once.
+        # share it once unpickled: it is pickled once. (PyPy 7.3 does not keep
+        # the identity of the strings of code objects.)
         assert all(c.co_filename is codes[0].co_filename for c in codes)
     for obj in _parity_objects():
         pickle.loads(cloudpickle_rust.dumps(obj))
