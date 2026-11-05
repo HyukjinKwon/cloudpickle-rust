@@ -1,0 +1,23 @@
+# Build backend (to build the Rust extension: `pip install -e .`)
+maturin >=1.9.4,<2.0
+# Linting tools
+ruff
+pre-commit
+# Dependencies for running the tests with pytest
+pytest
+psutil
+# To be able to test tornado coroutines
+tornado
+# To be able to test behavior in jupyter-notebooks
+ipykernel
+# To be able to test numpy specific things
+# but do not build numpy from source on Python nightly
+numpy >=1.18.5; python_version <= '3.12'
+# Utility package used when running the cloudpickle test suite
+./tests/cloudpickle_testpkg
+# Required for setup of the above utility package:
+setuptools; python_version >= '3.12'
+# Upstream cloudpickle, at the commit implemented by this version of
+# cloudpickle-rust, for the parity tests of tests/cloudpickle_rust_test.py
+# (it cannot be built nor imported on PyPy 3.11)
+cloudpickle @ git+https://github.com/cloudpipe/cloudpickle@4af5936c328de0b33fa9c636e210d9a9e1e97dd3 ; implementation_name != "pypy"

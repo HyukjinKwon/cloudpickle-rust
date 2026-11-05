@@ -1,0 +1,27 @@
+[package]
+name = "cloudpickle-rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "A Rust implementation of cloudpickle: extended pickling support for Python objects"
+license = "BSD-3-Clause"
+readme = "README.md"
+keywords = ["python", "pickle", "serialization", "pyo3", "cloudpickle"]
+categories = ["encoding", "api-bindings"]
+# The crate is distributed as a Python package on PyPI (built with maturin),
+# not as a library on crates.io.
+publish = false
+
+[lib]
+name = "cloudpickle_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = "0.28.3"
+
+[build-dependencies]
+pyo3-build-config = "0.28.3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
