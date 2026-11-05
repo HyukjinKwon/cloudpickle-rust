@@ -1,4 +1,4 @@
-0.2.0
+0.3.0
 =====
 
 - Add `cloudpickle_rust.cloudpickle.DYNAMIC_CODE_FILENAME`, the `co_filename`
