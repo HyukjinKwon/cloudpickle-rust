@@ -213,3 +213,4 @@ src/*.rs (a Rust implementation of cloudpickle/cloudpickle.py)
 python/cloudpickle_rust/__init__.py
 python/cloudpickle_rust/cloudpickle_fast.py
 tests/ (the cloudpickle test-suite, except tests/cloudpickle_rust_test.py)
+ci/install_coverage_subprocess_pth.py

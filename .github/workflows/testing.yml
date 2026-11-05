@@ -79,3 +79,90 @@ jobs:
       shell: bash
       run: |
         PYTHONPATH='.:tests' python -m pytest -r s -vs
+
+  coverage:
+    # Coverage of the Rust code, measured with cargo-llvm-cov (LLVM
+    # source-based code coverage) on an instrumented build of the extension
+    # module, and of the Python code, measured with coverage.py, in the pytest
+    # process and its Python subprocesses. It is measured with every version of
+    # Python and PyPy as the Rust code has version-specific code paths: Codecov
+    # merges the reports.
+    name: coverage (${{ matrix.python_version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To upload the reports to Codecov with OpenID Connect (without token).
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # PyPy 7.3 (pypy3.11-v7.3.x) and PyPy 8.0 (pypy-3.11) have different
+        # code objects.
+        python_version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t", "pypy3.11-v7.3.x", "pypy-3.11"]
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+    - name: Set up Python ${{ matrix.python_version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python_version }}
+        allow-prereleases: true
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Install project (instrumented build) and dependencies
+      shell: bash
+      run: |
+        # Build the extension module with the coverage instrumentation.
+        eval "$(cargo llvm-cov show-env --sh)"
+        cargo llvm-cov clean --workspace
+        python -m pip install --upgrade pip
+        MATURIN_PEP517_ARGS="--profile dev" python -m pip install -e .
+        python -m pip install -r dev-requirements.txt
+        python ci/install_coverage_subprocess_pth.py
+    - name: Display Python version
+      shell: bash
+      run: python -c "import sys; print(sys.version)"
+    - name: Test with pytest
+      shell: bash
+      run: |
+        # The instrumented extension module writes its profile data where
+        # cargo llvm-cov reads it.
+        eval "$(cargo llvm-cov show-env --sh)"
+        COVERAGE_PROCESS_START=$GITHUB_WORKSPACE/.coveragerc \
+          PYTHONPATH='.:tests' python -m pytest -r s -vs
+        coverage combine --append
+        coverage xml -i
+        cargo llvm-cov report --lcov --output-path rust-coverage.lcov
+    - name: Write the coverage summary and HTML reports
+      shell: bash
+      run: |
+        eval "$(cargo llvm-cov show-env --sh)"
+        cargo llvm-cov report --html --output-dir coverage-report
+        coverage html -i -d coverage-report/python
+        {
+          echo "## Coverage (Python ${{ matrix.python_version }})"
+          echo "### Rust code"
+          echo '```'
+          cargo llvm-cov report --summary-only
+          echo '```'
+          echo "### Python code"
+          coverage report -i --format=markdown
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: Upload the HTML coverage reports
+      uses: actions/upload-artifact@v6
+      with:
+        name: coverage-report-${{ matrix.python_version }}
+        path: coverage-report
+    - name: Publish coverage results
+      uses: codecov/codecov-action@v7
+      with:
+        files: ./rust-coverage.lcov,./coverage.xml
+        disable_search: true
+        name: ${{ matrix.python_version }}
+        use_oidc: true
