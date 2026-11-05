@@ -9,27 +9,15 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyCFunction, PyDict, PyList, PyModule, PyTuple, PyType};
 
+use crate::fallback::{self, upstream_if_patched};
 use crate::lookup::lookup_class_or_track;
 use crate::state::globals;
-use crate::utils::{add_function, for_each_item, getattr_any, setattr_any, str_eq, unpack2};
+use crate::utils::{add_function, for_each_item, getattr_any, setattr_any, str_eq};
 
 type R<'py> = PyResult<Bound<'py, PyAny>>;
 
-/// Sentinel for empty closures.
-#[pyclass(
-    module = "cloudpickle_rust.cloudpickle",
-    name = "_empty_cell_value",
-    frozen
-)]
-pub(crate) struct EmptyCellValue;
-
-#[pymethods]
-impl EmptyCellValue {
-    #[classmethod]
-    fn __reduce__<'py>(cls: &Bound<'py, PyType>) -> R<'py> {
-        Ok(cls.name()?.into_any())
-    }
-}
+// The `_empty_cell_value` sentinel is created by the module initialization
+// (an instance of a Python class, like upstream's).
 
 /// Return whether `func` is a Tornado coroutine function.
 ///
@@ -37,34 +25,25 @@ impl EmptyCellValue {
 #[pyfunction]
 fn is_tornado_coroutine<'py>(func: &Bound<'py, PyAny>) -> R<'py> {
     let py = func.py();
-    // `warnings.warn(...)` in upstream attributes the warning to the frame of
-    // `is_tornado_coroutine`, i.e. to the cloudpickle module (which matters
-    // for the warning filters: DeprecationWarnings are only shown by default
-    // when triggered from `__main__`). Do the same explicitly, as there is no
-    // Python frame for this function.
-    let module_dict = globals(py).module_dict.bind(py);
-    let registry = match module_dict.get_item(intern!(py, "__warningregistry__"))? {
-        Some(registry) => registry,
-        None => {
-            let registry = PyDict::new(py).into_any();
-            module_dict.set_item(intern!(py, "__warningregistry__"), &registry)?;
-            registry
-        }
-    };
-    let filename = match module_dict.get_item(intern!(py, "__file__"))? {
-        Some(filename) => filename.str()?.to_string(),
-        None => "cloudpickle_rust/cloudpickle".to_string(),
-    };
-    let filename = std::ffi::CString::new(filename).unwrap_or_default();
-    PyErr::warn_explicit(
-        py,
-        &py.get_type::<PyDeprecationWarning>(),
-        c"is_tornado_coroutine is deprecated in cloudpickle 3.0 and will be removed in cloudpickle 4.0. Use tornado.gen.is_coroutine_function directly instead.",
-        &filename,
-        1,
-        Some(c"cloudpickle_rust.cloudpickle"),
-        Some(&registry),
+    upstream_if_patched!(py, fallback::IS_TORNADO_COROUTINE, (func,));
+    // warnings.warn(..., category=DeprecationWarning): from the frame of the
+    // Python function, which attributes the warning to the module, like
+    // upstream.
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(
+        intern!(py, "category"),
+        py.get_type::<PyDeprecationWarning>(),
     )?;
+    fallback::load_global(py, intern!(py, "warnings"))?
+        .getattr(intern!(py, "warn"))?
+        .call(
+            (
+                "is_tornado_coroutine is deprecated in cloudpickle 3.0 and will be \
+                 removed in cloudpickle 4.0. Use tornado.gen.is_coroutine_function \
+                 directly instead.",
+            ),
+            Some(&kwargs),
+        )?;
     let modules = globals(py).sys.bind(py).getattr(intern!(py, "modules"))?;
     if !modules.contains(intern!(py, "tornado.gen"))? {
         return Ok(PyBool::new(py, false).to_owned().into_any());
@@ -84,6 +63,7 @@ fn subimport<'py>(name: &Bound<'py, PyAny>) -> R<'py> {
     // of this submodule. For instance, __import__('os.path') returns the `os`
     // module.
     let py = name.py();
+    upstream_if_patched!(py, fallback::SUBIMPORT, (name,));
     let g = globals(py);
     g.builtins
         .bind(py)
@@ -98,6 +78,7 @@ fn subimport<'py>(name: &Bound<'py, PyAny>) -> R<'py> {
 #[pyfunction]
 fn dynamic_subimport<'py>(name: &Bound<'py, PyAny>, vars: &Bound<'py, PyAny>) -> R<'py> {
     let py = name.py();
+    upstream_if_patched!(py, fallback::DYNAMIC_SUBIMPORT, (name, vars));
     let g = globals(py);
     let module = g.module_type.bind(py).call1((name,))?;
     let module_dict = module.getattr(intern!(py, "__dict__"))?;
@@ -110,6 +91,7 @@ fn dynamic_subimport<'py>(name: &Bound<'py, PyAny>, vars: &Bound<'py, PyAny>) ->
 #[pyo3(name = "_builtin_type")]
 fn builtin_type<'py>(name: &Bound<'py, PyAny>) -> R<'py> {
     let py = name.py();
+    upstream_if_patched!(py, fallback::BUILTIN_TYPE, (name,));
     if str_eq(name, "ClassType")? {
         // Backward compat to load pickle files generated with cloudpickle
         // < 1.3 even if loading pickle files from older versions is not
@@ -145,6 +127,11 @@ fn make_function<'py>(
     closure: &Bound<'py, PyAny>,
 ) -> R<'py> {
     let py = code.py();
+    upstream_if_patched!(
+        py,
+        fallback::MAKE_FUNCTION,
+        (code, globals, name, argdefs, closure)
+    );
     let g = crate::state::globals(py);
     // Setting __builtins__ in globals is needed for nogil CPython.
     globals.set_item(intern!(py, "__builtins__"), g.builtins_dict.bind(py))?;
@@ -178,6 +165,7 @@ fn make_cell<'py>(
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
 ) -> R<'py> {
+    upstream_if_patched!(py, fallback::MAKE_CELL, args, kwargs);
     let mut value = match args.len() {
         0 => None,
         1 => Some(args.get_item(0)?),
@@ -230,8 +218,19 @@ fn make_skeleton_class<'py>(
     class_tracker_id: &Bound<'py, PyAny>,
     extra: &Bound<'py, PyAny>,
 ) -> R<'py> {
-    let _ = extra;
     let py = name.py();
+    upstream_if_patched!(
+        py,
+        fallback::MAKE_SKELETON_CLASS,
+        (
+            type_constructor,
+            name,
+            bases,
+            type_kwargs,
+            class_tracker_id,
+            extra
+        )
+    );
     let g = globals(py);
     // We need to intern the keys of the type_kwargs dict to avoid having
     // different pickles for the same dynamic class depending on whether it was
@@ -288,8 +287,20 @@ fn make_skeleton_enum<'py>(
     class_tracker_id: &Bound<'py, PyAny>,
     extra: &Bound<'py, PyAny>,
 ) -> R<'py> {
-    let _ = extra;
     let py = name.py();
+    upstream_if_patched!(
+        py,
+        fallback::MAKE_SKELETON_ENUM,
+        (
+            bases,
+            name,
+            qualname,
+            members,
+            module,
+            class_tracker_id,
+            extra
+        )
+    );
     // enums always inherit from their base Enum class at the last position in
     // the list of base classes:
     let enum_base = bases.get_item(-1)?;
@@ -318,6 +329,18 @@ fn make_typevar<'py>(
     class_tracker_id: &Bound<'py, PyAny>,
 ) -> R<'py> {
     let py = name.py();
+    upstream_if_patched!(
+        py,
+        fallback::MAKE_TYPEVAR,
+        (
+            name,
+            bound,
+            constraints,
+            covariant,
+            contravariant,
+            class_tracker_id
+        )
+    );
     let mut args = vec![name.clone()];
     for constraint in constraints.try_iter()? {
         args.push(constraint?);
@@ -338,6 +361,12 @@ fn make_typevar<'py>(
 #[pyo3(name = "_make_dict_keys", signature = (obj, is_ordered=None), text_signature = "(obj, is_ordered=False)")]
 fn make_dict_keys<'py>(obj: &Bound<'py, PyAny>, is_ordered: Option<&Bound<'py, PyAny>>) -> R<'py> {
     let py = obj.py();
+    if !fallback::MAKE_DICT_KEYS.pristine(py)? {
+        return match is_ordered {
+            Some(is_ordered) => fallback::MAKE_DICT_KEYS.call(py, (obj, is_ordered), None),
+            None => fallback::MAKE_DICT_KEYS.call(py, (obj,), None),
+        };
+    }
     let factory = if is_truthy_opt(is_ordered)? {
         globals(py).ordered_dict.bind(py).clone()
     } else {
@@ -355,6 +384,12 @@ fn make_dict_values<'py>(
     is_ordered: Option<&Bound<'py, PyAny>>,
 ) -> R<'py> {
     let py = obj.py();
+    if !fallback::MAKE_DICT_VALUES.pristine(py)? {
+        return match is_ordered {
+            Some(is_ordered) => fallback::MAKE_DICT_VALUES.call(py, (obj, is_ordered), None),
+            None => fallback::MAKE_DICT_VALUES.call(py, (obj,), None),
+        };
+    }
     if is_truthy_opt(is_ordered)? {
         let pairs = PyList::empty(py);
         for (i, value) in obj.try_iter()?.enumerate() {
@@ -378,6 +413,12 @@ fn make_dict_values<'py>(
 #[pyo3(name = "_make_dict_items", signature = (obj, is_ordered=None), text_signature = "(obj, is_ordered=False)")]
 fn make_dict_items<'py>(obj: &Bound<'py, PyAny>, is_ordered: Option<&Bound<'py, PyAny>>) -> R<'py> {
     let py = obj.py();
+    if !fallback::MAKE_DICT_ITEMS.pristine(py)? {
+        return match is_ordered {
+            Some(is_ordered) => fallback::MAKE_DICT_ITEMS.call(py, (obj, is_ordered), None),
+            None => fallback::MAKE_DICT_ITEMS.call(py, (obj,), None),
+        };
+    }
     if is_truthy_opt(is_ordered)? {
         globals(py)
             .ordered_dict
@@ -407,10 +448,12 @@ fn file_reconstructor<'py>(retval: &Bound<'py, PyAny>) -> R<'py> {
 /// setattr on items of the slotstate. Instead, we have to modify them inplace.
 #[pyfunction]
 #[pyo3(name = "_function_setstate")]
-fn function_setstate<'py>(obj: &Bound<'py, PyAny>, state: &Bound<'py, PyAny>) -> PyResult<()> {
+fn function_setstate<'py>(obj: &Bound<'py, PyAny>, state: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::FUNCTION_SETSTATE, (obj, state));
     let g = globals(py);
-    let (state, slotstate) = unpack2(state)?;
+    let [state, slotstate]: [Bound<'py, PyAny>; 2] =
+        fallback::unpack(state, 2)?.try_into().expect("two values");
     obj.getattr(intern!(py, "__dict__"))?
         .call_method1(intern!(py, "update"), (state,))?;
 
@@ -444,15 +487,18 @@ fn function_setstate<'py>(obj: &Bound<'py, PyAny>, state: &Bound<'py, PyAny>) ->
         }
     }
 
-    for_each_item(&slotstate, |k, v| setattr_any(obj, &k, &v))
+    for_each_item(&slotstate, |k, v| setattr_any(obj, &k, &v))?;
+    Ok(py.None().into_bound(py))
 }
 
 #[pyfunction]
 #[pyo3(name = "_class_setstate")]
 fn class_setstate<'py>(obj: &Bound<'py, PyAny>, state: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::CLASS_SETSTATE, (obj, state));
     let g = globals(py);
-    let (state, _slotstate) = unpack2(state)?;
+    let [state, _slotstate]: [Bound<'py, PyAny>; 2] =
+        fallback::unpack(state, 2)?.try_into().expect("two values");
     let mut registry: Option<Bound<'py, PyAny>> = None;
     for_each_item(&state, |attrname, attr| {
         if attrname.eq(intern!(py, "_abc_impl"))? {
@@ -506,6 +552,7 @@ fn class_setstate<'py>(obj: &Bound<'py, PyAny>, state: &Bound<'py, PyAny>) -> R<
 #[pyo3(name = "_get_dataclass_field_type_sentinel")]
 fn get_dataclass_field_type_sentinel<'py>(name: &Bound<'py, PyAny>) -> R<'py> {
     let py = name.py();
+    upstream_if_patched!(py, fallback::GET_DATACLASS_FIELD_TYPE_SENTINEL, (name,));
     globals(py)
         .dataclass_sentinels
         .bind(py)

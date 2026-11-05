@@ -170,6 +170,21 @@ Compatibility with cloudpickle
   exists in `cloudpickle_rust.cloudpickle` (`Pickler`, `dumps`,
   `register_pickle_by_value`, but also the private helpers such as
   `_should_pickle_by_reference` or `_make_skeleton_class`).
+- **Same functions.** Like upstream's, the functions of
+  `cloudpickle_rust.cloudpickle` and the methods of its `Pickler` (except
+  `reducer_override`, see below) are Python functions, with the signatures,
+  the docstrings and the globals (the namespace of the module) of upstream's:
+  they call their Rust implementation, which they keep in their closure.
+- **Same globals.** Like upstream's code, cloudpickle-rust reads the globals of
+  its module (its state such as `_PICKLE_BY_VALUE_MODULES`, its functions, the
+  modules it imported) and the attributes of the standard library modules it
+  uses (`types.FunctionType`, `uuid.uuid4`, `sys.modules`...) when it runs:
+  replacing any of them, for instance with `monkeypatch`, changes its behavior
+  like upstream's. Each Rust function checks that the globals read by the
+  upstream function still hold their initial values (a dictionary lookup
+  each); if not, it runs the upstream function itself, from a copy of
+  upstream's `cloudpickle.py` included in the package, with the namespace of
+  `cloudpickle_rust.cloudpickle` as its globals.
 - **Same payloads.** For a given object, the pickle opcodes (including the
   memoization of objects, which cloudpickle carefully controls to produce
   deterministic payloads) are identical to the ones produced by upstream
@@ -178,7 +193,9 @@ Compatibility with cloudpickle
   test-suite, where only `import cloudpickle` was replaced by
   `import cloudpickle_rust as cloudpickle`. On CPython 3.8 to 3.14 and
   free-threaded 3.13t and 3.14t, every test has the same outcome (pass, skip
-  or expected failure) as with upstream cloudpickle.
+  or expected failure) as with upstream cloudpickle. Additional tests compare
+  the payloads, the functions and the behavior when globals are replaced with
+  upstream cloudpickle's.
 - **PyPy 3.11.** Upstream cloudpickle cannot be imported on PyPy 3.11 (PyPy
   7.3.20+ and 8.0), whose `pickle.Pickler` became a native class without the
   `dispatch` attribute that its PyPy implementation relies on (and its reducer
@@ -188,29 +205,28 @@ Compatibility with cloudpickle
   and passes the whole test-suite on PyPy 7.3.23 and 8.0.1. On PyPy 8.0.1,
   with upstream's import fixed, every upstream test has the same outcome.
 
-The few implementation-level differences, which do not change what is
+The remaining implementation-level differences, which do not change what is
 pickled:
 
-- The `Pickler` methods are implemented in Rust (as method descriptors, like
-  the methods of builtin types) instead of Python functions, and
-  `Pickler.dispatch_table` is a subclass of `collections.ChainMap` with a
-  native `__getitem__`.
-- Internal calls between the functions of the module are native: replacing a
-  private function of `cloudpickle_rust.cloudpickle` (for instance with
-  `monkeypatch`) does not change the behavior of the pickler. The module-level
-  `Pickler` and `DEFAULT_PROTOCOL` attributes, as well as the standard library
-  functions used by cloudpickle (`uuid.uuid4`, `io.BytesIO`, ...), are looked
-  up at call time like in upstream.
-- `_walk_global_ops` decodes the bytecode directly (the encoding of the
-  global-referencing instructions is measured when the module is imported),
-  instead of relying on `dis.get_instructions`, and returns an iterator instead
-  of a generator.
-- `_extract_code_globals_cache` maps `id(code)` to `(weakref(code), names)`
-  instead of being a `weakref.WeakKeyDictionary`.
-- The functions accept the same arguments (including by keyword) as
-  upstream, and `inspect.signature` reports the same signatures, except for
-  `_make_cell(value=_empty_cell_value)`: the signature of a builtin function
-  cannot have a default value which is not a literal.
+- `Pickler.reducer_override`, which the C pickler calls for every object, is
+  a method descriptor implemented in Rust (like the methods of builtin types)
+  rather than a Python function: its `self` parameter is positional-only.
+- `Pickler.dispatch_table` is a subclass of `collections.ChainMap`
+  (`_DispatchTable`) with a native `__getitem__`.
+- `_walk_global_ops` decodes the bytecode of code objects directly (the
+  encoding of the global-referencing instructions is measured when the module
+  is imported) rather than with `dis.get_instructions`, and returns an
+  iterator rather than a generator.
+- The builtins (`isinstance`, `getattr`, ...) are not part of the globals
+  checked by the Rust functions: shadowing them with globals of
+  `cloudpickle_rust.cloudpickle`, or replacing them in the `builtins` module,
+  does not change its behavior (unless it runs upstream's code because another
+  global was replaced).
+- The Rust functions have no frames: exceptions raised by them have shorter
+  tracebacks, `dumps` passes `None` rather than a traceback to the `__exit__`
+  method of its `io.BytesIO` for such exceptions, and deeply nested objects
+  can reach the recursion limit at a slightly different depth.
+- The docstring of the module also states the license of cloudpickle-rust.
 
 One extension, which upstream does not have:
 
@@ -239,28 +255,28 @@ the pickler's `dispatch_table` (which cloudpickle performs in Python for every
 object that is not handled by `reducer_override`).
 
 Time of `dumps` with [`benchmarks/bench.py`](benchmarks/bench.py), on an
-Apple M3 Max with CPython 3.13.14 (release build of cloudpickle-rust 0.1.0,
+Apple M3 Max with CPython 3.13.14 (release build of cloudpickle-rust,
 cloudpickle 3.2.0.dev0, best of 15 interleaved runs):
 
 | Payload | cloudpickle | cloudpickle-rust | Speedup |
 |---|---:|---:|---:|
-| A lambda | 10.7 µs | 7.2 µs | 1.48× |
-| A closure using globals | 16.1 µs | 10.6 µs | 1.52× |
-| A dynamic class | 27.7 µs | 16.8 µs | 1.65× |
-| A dynamic dataclass | 74.4 µs | 46.7 µs | 1.59× |
-| A dynamic enum | 19.6 µs | 11.7 µs | 1.68× |
-| A generic class (`typing.Generic`) | 32.7 µs | 19.9 µs | 1.64× |
-| 1,000 distinct lambdas | 5.16 ms | 3.51 ms | 1.47× |
-| 100,000 instances of a dynamic class | 94.1 ms | 59.5 ms | 1.58× |
-| 100,000 instances of a dynamic dataclass | 103.1 ms | 65.9 ms | 1.56× |
-| 100,000 builtin objects (dict of lists) | 25.8 ms | 25.3 ms | 1.02× |
+| A lambda | 10.6 µs | 8.0 µs | 1.32× |
+| A closure using globals | 16.6 µs | 11.9 µs | 1.40× |
+| A dynamic class | 27.5 µs | 19.1 µs | 1.44× |
+| A dynamic dataclass | 75.4 µs | 54.3 µs | 1.39× |
+| A dynamic enum | 19.8 µs | 13.0 µs | 1.52× |
+| A generic class (`typing.Generic`) | 32.8 µs | 22.6 µs | 1.45× |
+| 1,000 distinct lambdas | 5.14 ms | 3.99 ms | 1.29× |
+| 100,000 instances of a dynamic class | 93.4 ms | 60.8 ms | 1.54× |
+| 100,000 instances of a dynamic dataclass | 99.2 ms | 66.7 ms | 1.49× |
+| 100,000 builtin objects (dict of lists) | 19.4 ms | 19.3 ms | 1.00× |
 
 For the collections of instances, plain `pickle.dumps` (which pickles the
-classes by reference instead of by value) takes 41.1 ms and 46.3 ms: the time
-cloudpickle spends on top of the standard library pickler is about 3× smaller
+classes by reference instead of by value) takes 41.2 ms and 45.9 ms: the time
+cloudpickle spends on top of the standard library pickler is about 2.5× smaller
 with cloudpickle-rust. Builtin types (`dict`, `list`, `str`, `int`...) are
 handled by the standard library pickler without involving cloudpickle at all,
-hence the same speed (plain `pickle.dumps` takes 25.2 ms).
+hence the same speed (plain `pickle.dumps` takes 19.1 ms).
 
 
 Running the tests

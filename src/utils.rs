@@ -9,13 +9,11 @@ use std::ffi::CStr;
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use pyo3::exceptions::{PyKeyError, PyNameError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::ffi;
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict, PyModule, PyString, PyTuple, PyType};
-
-use crate::state::globals;
 
 /// Equivalent of Python's `"".join(s)`.
 ///
@@ -128,42 +126,23 @@ pub(crate) fn dict_pop_required<'py>(
     dict_pop(d, key)?.ok_or_else(|| PyKeyError::new_err((key.clone().unbind(),)))
 }
 
-/// `a, b = obj` (iterable unpacking of exactly two values).
+/// `a, b = obj` (iterable unpacking of exactly two values, with the error
+/// messages of the running Python version).
 pub(crate) fn unpack2<'py>(
     obj: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
-    if let Ok(t) = obj.cast_exact::<PyTuple>() {
-        if t.len() == 2 {
-            return Ok((t.get_item(0)?, t.get_item(1)?));
-        }
+    let mut values = crate::fallback::unpack(obj, 2)?.into_iter();
+    match (values.next(), values.next()) {
+        (Some(a), Some(b)) => Ok((a, b)),
+        _ => unreachable!("unpacking returns two values"),
     }
-    let mut it = obj.try_iter().map_err(|_| {
-        PyTypeError::new_err(format!(
-            "cannot unpack non-iterable {} object",
-            obj.get_type()
-                .name()
-                .map(|n| n.to_string())
-                .unwrap_or_default()
-        ))
-    })?;
-    let first = it.next().transpose()?;
-    let second = it.next().transpose()?;
-    match (first, second) {
-        (Some(a), Some(b)) => {
-            if it.next().transpose()?.is_some() {
-                return Err(PyValueError::new_err(
-                    "too many values to unpack (expected 2)",
-                ));
-            }
-            Ok((a, b))
-        }
-        (Some(_), None) => Err(PyValueError::new_err(
-            "not enough values to unpack (expected 2, got 1)",
-        )),
-        _ => Err(PyValueError::new_err(
-            "not enough values to unpack (expected 2, got 0)",
-        )),
-    }
+}
+
+/// `format(obj, "")`: how an f-string interpolates `obj`.
+pub(crate) fn py_format<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    let empty = PyString::new(py, "");
+    unsafe { Bound::from_owned_ptr_or_err(py, ffi::PyObject_Format(obj.as_ptr(), empty.as_ptr())) }
 }
 
 /// Iterate over `mapping.items()` using the Python protocol (safe even if
@@ -201,19 +180,6 @@ pub(crate) fn set_attr<'py>(
     value: impl IntoPyObject<'py>,
 ) -> PyResult<()> {
     m.setattr(name, value)
-}
-
-/// Value of a global variable of the `cloudpickle_rust.cloudpickle` module,
-/// looked up at call time like in the upstream Python code.
-pub(crate) fn module_global<'py>(
-    py: Python<'py>,
-    name: &Bound<'py, PyString>,
-) -> PyResult<Bound<'py, PyAny>> {
-    globals(py)
-        .module_dict
-        .bind(py)
-        .get_item(name)?
-        .ok_or_else(|| PyNameError::new_err(format!("name '{name}' is not defined")))
 }
 
 /// Register a `#[pyfunction]` in the module under its Python name.

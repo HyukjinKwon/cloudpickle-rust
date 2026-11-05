@@ -12,9 +12,12 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyDict, PyList, PyModule, PyString, PyTuple};
 
-use crate::code::{extract_code_globals, find_imported_submodules};
+use crate::code::{
+    extract_code_globals, find_imported_submodules, find_imported_submodules_native, is_code,
+};
+use crate::fallback::{self, upstream_if_patched};
 use crate::lookup::{
     get_or_create_tracker_id, is_registered_pickle_by_value, lookup_module_and_qualname,
     should_pickle_by_reference,
@@ -107,6 +110,7 @@ pub(crate) fn get_bases<'py>(typ: &Bound<'py, PyAny>) -> R<'py> {
 
 pub(crate) fn class_getnewargs<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::CLASS_GETNEWARGS, (obj,));
     let g = globals(py);
     let type_kwargs = PyDict::new(py);
     let obj_dict = obj.getattr(intern!(py, "__dict__"))?;
@@ -151,6 +155,7 @@ fn enum_members<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
 
 pub(crate) fn enum_getnewargs<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::ENUM_GETNEWARGS, (obj,));
     let members = enum_members(obj)?;
     Ok((
         obj.getattr(intern!(py, "__bases__"))?,
@@ -195,17 +200,7 @@ fn class_getstate_parts<'py>(
                     .bind(py)
                     .call_method1(intern!(py, "_get_dump"), (obj,))?;
                 // (registry, _, _, _) = abc._get_dump(obj)
-                let values = dump.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-                if values.len() < 4 {
-                    return Err(PyValueError::new_err(format!(
-                        "not enough values to unpack (expected 4, got {})",
-                        values.len()
-                    )));
-                } else if values.len() > 4 {
-                    return Err(PyValueError::new_err(
-                        "too many values to unpack (expected 4)",
-                    ));
-                }
+                let values = fallback::unpack(&dump, 4)?;
                 let registry = &values[0];
                 for subclass_weakref in registry.try_iter()? {
                     abc_impl.append(subclass_weakref?.call0()?)?;
@@ -249,13 +244,14 @@ fn class_getstate_parts<'py>(
 }
 
 pub(crate) fn class_getstate<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
-    Ok(class_getstate_parts(obj)?
-        .into_pyobject(obj.py())?
-        .into_any())
+    let py = obj.py();
+    upstream_if_patched!(py, fallback::CLASS_GETSTATE, (obj,));
+    Ok(class_getstate_parts(obj)?.into_pyobject(py)?.into_any())
 }
 
 pub(crate) fn enum_getstate<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::ENUM_GETSTATE, (obj,));
     let (clsdict, slotstate) = class_getstate_parts(obj)?;
 
     let members = enum_members(obj)?;
@@ -284,6 +280,7 @@ pub(crate) fn enum_getstate<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 /// from importable modules.
 pub(crate) fn dynamic_class_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::DYNAMIC_CLASS_REDUCE, (obj,));
     let g = globals(py);
     let reduced = if is_subclass(obj, g.enum_type.bind(py))? {
         (
@@ -310,6 +307,7 @@ pub(crate) fn dynamic_class_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 /// Select the reducer depending on the dynamic nature of the class obj.
 pub(crate) fn class_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::CLASS_REDUCE, (obj,));
     let g = globals(py);
     let type_type = py.get_type::<pyo3::types::PyType>();
     if obj.is(g.none_type.bind(py)) {
@@ -328,7 +326,7 @@ pub(crate) fn class_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
             .into_pyobject(py)?
             .into_any());
     }
-    if !should_pickle_by_reference(obj, None)? {
+    if !should_pickle_by_reference(obj, None)?.is_truthy()? {
         return dynamic_class_reduce(obj);
     }
     Ok(not_implemented(py))
@@ -340,6 +338,7 @@ pub(crate) fn class_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 pub(crate) fn get_cell_contents<'py>(cell: &Bound<'py, PyAny>) -> R<'py> {
     let py = cell.py();
+    upstream_if_patched!(py, fallback::GET_CELL_CONTENTS, (cell,));
     match cell.getattr(intern!(py, "cell_contents")) {
         Ok(value) => Ok(value),
         // Handle empty cells explicitly with a sentinel value.
@@ -358,6 +357,7 @@ pub(crate) fn function_getstate<'py>(func: &Bound<'py, PyAny>) -> R<'py> {
     //   unpickling time by iterating over slotstate and calling setattr(func,
     //   slotname, slotvalue)
     let py = func.py();
+    upstream_if_patched!(py, fallback::FUNCTION_GETSTATE, (func,));
     let slotstate = PyDict::new(py);
     // Hack to circumvent non-predictable memoization caused by string interning.
     // See the inline comment in _class_setstate for details.
@@ -384,16 +384,20 @@ pub(crate) fn function_getstate<'py>(func: &Bound<'py, PyAny>) -> R<'py> {
     let f_globals_ref = extract_code_globals(&code)?;
     let func_globals = func.getattr(intern!(py, "__globals__"))?;
     let f_globals = PyDict::new(py);
-    match func_globals.cast_exact::<PyDict>() {
-        Ok(func_globals) => {
-            for k in f_globals_ref.keys() {
+    match (
+        f_globals_ref.cast_exact::<PyDict>(),
+        func_globals.cast_exact::<PyDict>(),
+    ) {
+        (Ok(names), Ok(func_globals)) => {
+            for k in names.keys() {
                 if let Some(v) = func_globals.get_item(&k)? {
                     f_globals.set_item(k, v)?;
                 }
             }
         }
-        Err(_) => {
-            for k in f_globals_ref.keys() {
+        _ => {
+            for k in f_globals_ref.try_iter()? {
+                let k = k?;
                 if func_globals.contains(&k)? {
                     f_globals.set_item(&k, func_globals.get_item(&k)?)?;
                 }
@@ -402,22 +406,36 @@ pub(crate) fn function_getstate<'py>(func: &Bound<'py, PyAny>) -> R<'py> {
     }
 
     let closure = func.getattr(intern!(py, "__closure__"))?;
-    let mut closure_values = Vec::new();
-    if !closure.is_none() {
+    let closure_values = if closure.is_none() {
+        PyTuple::empty(py).into_any()
+    } else {
+        let values = PyList::empty(py);
         for cell in closure.try_iter()? {
-            closure_values.push(get_cell_contents(&cell?)?);
+            values.append(get_cell_contents(&cell?)?)?;
         }
-    }
-    let dependencies = f_globals.values().iter().chain(closure_values).map(Ok);
+        values.into_any()
+    };
 
     // Extract currently-imported submodules used by func. Storing these modules
     // in a smoke _cloudpickle_subimports attribute of the object's state will
     // trigger the side effect of importing these modules at unpickling time
     // (which is necessary for func to work correctly once depickled)
-    slotstate.set_item(
-        intern!(py, "_cloudpickle_submodules"),
-        find_imported_submodules(&code, dependencies)?,
-    )?;
+    let submodules = if is_code(&code) && fallback::FIND_IMPORTED_SUBMODULES.pristine(py)? {
+        // The Rust implementation iterates over the dependencies like upstream's
+        // over `itertools.chain(...)`.
+        let closure_values = closure_values.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        let dependencies = f_globals.values().into_iter().chain(closure_values).map(Ok);
+        find_imported_submodules_native(&code, dependencies)?
+    } else {
+        let dependencies = fallback::load_global(py, intern!(py, "itertools"))?
+            .getattr(intern!(py, "chain"))?
+            .call1((
+                f_globals.call_method0(intern!(py, "values"))?,
+                closure_values,
+            ))?;
+        find_imported_submodules(&code, &dependencies)?
+    };
+    slotstate.set_item(intern!(py, "_cloudpickle_submodules"), submodules)?;
     slotstate.set_item(intern!(py, "__globals__"), f_globals)?;
 
     // Hack to circumvent non-predictable memoization caused by string interning.
@@ -436,6 +454,7 @@ pub(crate) fn function_getstate<'py>(func: &Bound<'py, PyAny>) -> R<'py> {
 /// Cell (containing values of a function's free variables) reducer.
 fn cell_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::CELL_REDUCE, (obj,));
     let g = globals(py);
     match obj.getattr(intern!(py, "cell_contents")) {
         // cell is empty
@@ -461,9 +480,18 @@ fn pickling_error(py: Python<'_>, msg: String) -> PyErr {
     PyErr::from_type(globals(py).pickling_error.bind(py).clone(), msg)
 }
 
+/// `pickle.PicklingError(format % value)`.
+fn pickling_error_formatted(py: Python<'_>, format: &str, value: &Bound<'_, PyAny>) -> PyErr {
+    match PyString::new(py, format).rem(value) {
+        Ok(msg) => PyErr::from_type(globals(py).pickling_error.bind(py).clone(), (msg.unbind(),)),
+        Err(err) => err,
+    }
+}
+
 /// Save a file.
 fn file_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::FILE_REDUCE, (obj,));
     let g = globals(py);
     let sys = g.sys.bind(py);
     if !obj.hasattr(intern!(py, "name"))? || !obj.hasattr(intern!(py, "mode"))? {
@@ -498,22 +526,17 @@ fn file_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     }
     let mode = obj.getattr(intern!(py, "mode"))?;
     if !mode.contains("r")? && !mode.contains("+")? {
-        return Err(pickling_error(
+        return Err(pickling_error_formatted(
             py,
-            format!(
-                "Cannot pickle files that are not opened for reading: {}",
-                mode.str()?
-            ),
+            "Cannot pickle files that are not opened for reading: %s",
+            &mode,
         ));
     }
 
     let name = obj.getattr(intern!(py, "name"))?;
 
-    let retval = g
-        .io_module
-        .bind(py)
-        .getattr(intern!(py, "StringIO"))?
-        .call0()?;
+    // `import io` in the body of upstream's function.
+    let retval = py.import("io")?.getattr(intern!(py, "StringIO"))?.call0()?;
 
     let read = || -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
         // Read the whole file
@@ -526,10 +549,8 @@ fn file_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let (curloc, contents) = match read() {
         Ok(v) => v,
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyOSError>(py) => {
-            let new = pickling_error(
-                py,
-                format!("Cannot pickle file {} as it cannot be read", name.str()?),
-            );
+            let new =
+                pickling_error_formatted(py, "Cannot pickle file %s as it cannot be read", &name);
             return Err(raise_from(py, new, err));
         }
         Err(err) => return Err(err),
@@ -559,6 +580,7 @@ fn getset_descriptor_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn mappingproxy_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::MAPPINGPROXY_REDUCE, (obj,));
     let g = globals(py);
     let as_dict = py.get_type::<PyDict>().call1((obj,))?;
     let mappingproxy_type = g
@@ -581,8 +603,9 @@ fn memoryview_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn module_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::MODULE_REDUCE, (obj,));
     let g = globals(py);
-    if should_pickle_by_reference(obj, None)? {
+    if should_pickle_by_reference(obj, None)?.is_truthy()? {
         Ok((
             g.subimport.bind(py),
             (obj.getattr(intern!(py, "__name__"))?,),
@@ -609,6 +632,7 @@ fn module_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn method_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::METHOD_REDUCE, (obj,));
     let g = globals(py);
     Ok((
         g.types_module.bind(py).getattr(intern!(py, "MethodType"))?,
@@ -623,6 +647,7 @@ fn method_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn logger_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::LOGGER_REDUCE, (obj,));
     let g = globals(py);
     let get_logger = g
         .logging_module
@@ -635,6 +660,7 @@ fn logger_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn root_logger_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::ROOT_LOGGER_REDUCE, (obj,));
     let g = globals(py);
     let get_logger = g
         .logging_module
@@ -663,6 +689,7 @@ fn property_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn weakset_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::WEAKSET_REDUCE, (obj,));
     let g = globals(py);
     let items = py.get_type::<PyList>().call1((obj,))?;
     let weakset = g.weakref_module.bind(py).getattr(intern!(py, "WeakSet"))?;
@@ -682,6 +709,7 @@ fn as_dict<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 // sensitive information
 fn dict_keys_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::DICT_KEYS_REDUCE, (obj,));
     Ok((globals(py).make_dict_keys.bind(py), (as_list(obj)?,))
         .into_pyobject(py)?
         .into_any())
@@ -689,6 +717,7 @@ fn dict_keys_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn dict_values_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::DICT_VALUES_REDUCE, (obj,));
     Ok((globals(py).make_dict_values.bind(py), (as_list(obj)?,))
         .into_pyobject(py)?
         .into_any())
@@ -696,6 +725,7 @@ fn dict_values_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn dict_items_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::DICT_ITEMS_REDUCE, (obj,));
     Ok((globals(py).make_dict_items.bind(py), (as_dict(obj)?,))
         .into_pyobject(py)?
         .into_any())
@@ -703,6 +733,7 @@ fn dict_items_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn odict_keys_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::ODICT_KEYS_REDUCE, (obj,));
     Ok((globals(py).make_dict_keys.bind(py), (as_list(obj)?, true))
         .into_pyobject(py)?
         .into_any())
@@ -710,6 +741,7 @@ fn odict_keys_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn odict_values_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::ODICT_VALUES_REDUCE, (obj,));
     Ok(
         (globals(py).make_dict_values.bind(py), (as_list(obj)?, true))
             .into_pyobject(py)?
@@ -719,6 +751,7 @@ fn odict_values_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn odict_items_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::ODICT_ITEMS_REDUCE, (obj,));
     Ok(
         (globals(py).make_dict_items.bind(py), (as_dict(obj)?, true))
             .into_pyobject(py)?
@@ -728,6 +761,7 @@ fn odict_items_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 fn dataclass_field_base_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::DATACLASS_FIELD_BASE_REDUCE, (obj,));
     Ok((
         globals(py).get_dataclass_field_type_sentinel.bind(py),
         (obj.getattr(intern!(py, "name"))?,),
@@ -742,6 +776,7 @@ fn dataclass_field_base_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
 
 pub(crate) fn decompose_typevar<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     let py = obj.py();
+    upstream_if_patched!(py, fallback::DECOMPOSE_TYPEVAR, (obj,));
     Ok((
         obj.getattr(intern!(py, "__name__"))?,
         obj.getattr(intern!(py, "__bound__"))?,
@@ -758,14 +793,20 @@ fn typevar_reduce<'py>(obj: &Bound<'py, PyAny>) -> R<'py> {
     // TypeVar instances require the module information hence why we
     // are not using the _should_pickle_by_reference directly
     let py = obj.py();
+    upstream_if_patched!(py, fallback::TYPEVAR_REDUCE, (obj,));
     let g = globals(py);
     let name = obj.getattr(intern!(py, "__name__"))?;
-    match lookup_module_and_qualname(obj, Some(&name))? {
-        Some((module, name)) if !is_registered_pickle_by_value(&module)? => {
-            Ok((g.getattr.bind(py), (module, name))
-                .into_pyobject(py)?
-                .into_any())
+    let module_and_name = lookup_module_and_qualname(obj, Some(&name))?;
+    let by_value = match &module_and_name {
+        None => true,
+        Some(module_and_name) => {
+            is_registered_pickle_by_value(&module_and_name.get_item(0)?)?.is_truthy()?
         }
+    };
+    match module_and_name {
+        Some(module_and_name) if !by_value => Ok((g.getattr.bind(py), module_and_name)
+            .into_pyobject(py)?
+            .into_any()),
         _ => Ok((g.make_typevar.bind(py), decompose_typevar(obj)?)
             .into_pyobject(py)?
             .into_any()),

@@ -6,12 +6,30 @@ use std::collections::HashSet;
 use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{
-    PyBytes, PyCFunction, PyDict, PyList, PyModule, PyString, PyTuple, PyWeakrefReference,
-};
+use pyo3::types::{PyBytes, PyDict, PyList, PyModule, PyString, PyTuple, PyWeakrefReference};
 
-use crate::state::{globals, GLOBALS};
-use crate::utils::{add_function, fresh_str, module_global, py_id};
+use crate::fallback;
+use crate::state::globals;
+use crate::utils::{add_function, fresh_str};
+
+type R<'py> = PyResult<Bound<'py, PyAny>>;
+
+/// Whether `obj` is a code object (the native implementations only handle
+/// code objects: upstream's code handles the other objects).
+pub(crate) fn is_code(obj: &Bound<'_, PyAny>) -> bool {
+    obj.get_type()
+        .is(globals(obj.py()).code_type.bind(obj.py()))
+}
+
+/// `_walk_global_ops(code)`: the list of the names (native implementation),
+/// or upstream's generator.
+pub(crate) fn walk_global_ops<'py>(code: &Bound<'py, PyAny>) -> R<'py> {
+    let py = code.py();
+    if !is_code(code) || !fallback::WALK_GLOBAL_OPS.pristine(py)? {
+        return fallback::WALK_GLOBAL_OPS.call(py, (code,), None);
+    }
+    Ok(PyList::new(py, walk_global_ops_names(code)?)?.into_any())
+}
 
 /// Names referenced by the global-referencing instructions of `code`
 /// (`LOAD_GLOBAL`, `STORE_GLOBAL` and `DELETE_GLOBAL`), in bytecode order.
@@ -20,7 +38,7 @@ use crate::utils::{add_function, fresh_str, module_global, py_id};
 /// instr.opcode in GLOBAL_OPS]` but works directly on the raw bytecode.
 /// Inline cache entries (Python 3.11+) are zeroed in `co_code`, i.e. decode
 /// as harmless `CACHE` instructions without argument.
-pub(crate) fn walk_global_ops<'py>(code: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+fn walk_global_ops_names<'py>(code: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let py = code.py();
     let ops = &globals(py).opcodes;
     let Some(load_global_shift) = ops.load_global_shift else {
@@ -191,37 +209,40 @@ pub(crate) fn measure_code_exceptiontable_last<'py>(py: Python<'py>) -> PyResult
 #[pyfunction]
 #[pyo3(name = "_walk_global_ops")]
 fn py_walk_global_ops<'py>(code: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    // Upstream returns a generator: return an iterator for consistency.
-    let names = PyList::new(code.py(), walk_global_ops(code)?)?;
-    Ok(names.as_any().try_iter()?.into_any())
+    let names = walk_global_ops(code)?;
+    if names.cast_exact::<PyList>().is_ok() {
+        // Upstream returns a generator: return an iterator for consistency.
+        return Ok(names.try_iter()?.into_any());
+    }
+    Ok(names)
 }
 
 /// Find all globals names read or written to by codeblock co.
-///
-/// The results are cached per code object (by identity) in
-/// `_extract_code_globals_cache`, a dict mapping `id(code)` to a
-/// `(weakref(code), names)` pair. The weakref callback evicts the entry when
-/// the code object is garbage collected.
-pub(crate) fn extract_code_globals<'py>(co: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+pub(crate) fn extract_code_globals<'py>(co: &Bound<'py, PyAny>) -> R<'py> {
     let py = co.py();
+    if !is_code(co) || !fallback::EXTRACT_CODE_GLOBALS.pristine(py)? {
+        return fallback::EXTRACT_CODE_GLOBALS.call(py, (co,), None);
+    }
     let g = globals(py);
+    // A weakref.WeakKeyDictionary, like upstream's.
     let cache = g.code_globals_cache.bind(py);
-    let key = py_id(co)?;
-    if let Some(entry) = cache.get_item(&key)? {
-        if let Ok(entry) = entry.cast::<PyTuple>() {
-            let referent = entry.get_item(0)?.call0()?;
-            if referent.is(co) {
-                return Ok(entry.get_item(1)?.cast_into::<PyDict>()?);
-            }
-        }
+    let out_names = match weak_key_dictionary_data(cache)? {
+        // `self.data.get(ref(key), default)`
+        Some(data) => data
+            .get_item(PyWeakrefReference::new(co)?)?
+            .unwrap_or_else(|| py.None().into_bound(py)),
+        None => cache.call_method1(intern!(py, "get"), (co,))?,
+    };
+    if !out_names.is_none() {
+        return Ok(out_names);
     }
 
     // We use a dict with None values instead of a set to get a
     // deterministic order and avoid introducing non-deterministic pickle
     // bytes as a results.
     let out_names = PyDict::new(py);
-    for name in walk_global_ops(co)? {
-        out_names.set_item(name, py.None())?;
+    for name in walk_global_ops(co)?.try_iter()? {
+        out_names.set_item(name?, py.None())?;
     }
 
     // Declaring a function inside another one using the "def ..." syntax
@@ -236,40 +257,54 @@ pub(crate) fn extract_code_globals<'py>(co: &Bound<'py, PyAny>) -> PyResult<Boun
         for constant in co_consts.try_iter()? {
             let constant = constant?;
             if constant.is_instance(code_type)? {
-                out_names.update(extract_code_globals(&constant)?.as_mapping())?;
+                let names = extract_code_globals(&constant)?;
+                match names.cast_exact::<PyDict>() {
+                    Ok(names) => out_names.update(names.as_mapping())?,
+                    Err(_) => {
+                        out_names.call_method1(intern!(py, "update"), (names,))?;
+                    }
+                }
             }
         }
     }
 
-    let callback_key = key.clone().unbind();
-    let callback = PyCFunction::new_closure(
-        py,
-        Some(c"_evict_code_globals"),
-        None,
-        move |args, _kwargs| -> PyResult<()> {
-            let py = args.py();
-            if let Some(g) = GLOBALS.get(py) {
-                let cache = g.code_globals_cache.bind(py);
-                let key = callback_key.bind(py);
-                let dead_ref = args.get_item(0)?;
-                if let Some(entry) = cache.get_item(key)? {
-                    // Only evict the entry if it was created for the dead object.
-                    if entry.cast::<PyTuple>()?.get_item(0)?.is(&dead_ref) {
-                        cache.del_item(key)?;
-                    }
-                }
-            }
-            Ok(())
-        },
-    )?;
-    let weak = PyWeakrefReference::new_with(co, callback)?;
-    cache.set_item(key, (weak, &out_names))?;
-    Ok(out_names)
+    match weak_key_dictionary_data(cache)? {
+        // `self.data[ref(key, self._remove)] = value`
+        Some(data) => {
+            let remove = cache.getattr(intern!(py, "_remove"))?;
+            data.set_item(PyWeakrefReference::new_with(co, remove)?, &out_names)?;
+        }
+        None => cache.set_item(co, &out_names)?,
+    }
+    Ok(out_names.into_any())
+}
+
+/// The `data` dict of a `weakref.WeakKeyDictionary` whose `get` and
+/// `__setitem__` methods are the original ones, which are then executed
+/// natively.
+fn weak_key_dictionary_data<'py>(
+    cache: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let py = cache.py();
+    let (class, get, setitem) = &globals(py).weak_key_dictionary;
+    let cls = cache.get_type();
+    if !cls.is(class.bind(py))
+        || !cls.getattr(intern!(py, "get"))?.is(get.bind(py))
+        || !cls
+            .getattr(intern!(py, "__setitem__"))?
+            .is(setitem.bind(py))
+    {
+        return Ok(None);
+    }
+    Ok(cache
+        .getattr(intern!(py, "data"))?
+        .cast_into_exact::<PyDict>()
+        .ok())
 }
 
 #[pyfunction]
 #[pyo3(name = "_extract_code_globals")]
-fn py_extract_code_globals<'py>(co: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+fn py_extract_code_globals<'py>(co: &Bound<'py, PyAny>) -> R<'py> {
     extract_code_globals(co)
 }
 
@@ -298,8 +333,21 @@ fn py_extract_code_globals<'py>(co: &Bound<'py, PyAny>) -> PyResult<Bound<'py, P
 /// not being imported
 pub(crate) fn find_imported_submodules<'py>(
     code: &Bound<'py, PyAny>,
+    top_level_dependencies: &Bound<'py, PyAny>,
+) -> R<'py> {
+    let py = code.py();
+    if !is_code(code) || !fallback::FIND_IMPORTED_SUBMODULES.pristine(py)? {
+        return fallback::FIND_IMPORTED_SUBMODULES.call(py, (code, top_level_dependencies), None);
+    }
+    find_imported_submodules_native(code, top_level_dependencies.try_iter()?)
+}
+
+/// The Rust implementation of `_find_imported_submodules` (when the globals
+/// it reads are the original ones, see `find_imported_submodules`).
+pub(crate) fn find_imported_submodules_native<'py>(
+    code: &Bound<'py, PyAny>,
     top_level_dependencies: impl IntoIterator<Item = PyResult<Bound<'py, PyAny>>>,
-) -> PyResult<Bound<'py, PyList>> {
+) -> R<'py> {
     let py = code.py();
     let g = globals(py);
     let module_type = g.module_type.bind(py);
@@ -385,7 +433,7 @@ pub(crate) fn find_imported_submodules<'py>(
             }
         }
     }
-    Ok(subimports)
+    Ok(subimports.into_any())
 }
 
 /// `set(code.co_names)`
@@ -424,8 +472,8 @@ impl<'py> CoNames<'py> {
 fn py_find_imported_submodules<'py>(
     code: &Bound<'py, PyAny>,
     top_level_dependencies: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyList>> {
-    find_imported_submodules(code, top_level_dependencies.try_iter()?)
+) -> R<'py> {
+    find_imported_submodules(code, top_level_dependencies)
 }
 
 /// The `co_filename` given to a code object pickled by value.
@@ -437,7 +485,7 @@ fn py_find_imported_submodules<'py>(
 /// the processes that load the code can show where it was defined.
 fn dynamic_code_filename<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let py = obj.py();
-    let filename = module_global(py, intern!(py, "DYNAMIC_CODE_FILENAME"))?;
+    let filename = fallback::load_global(py, intern!(py, "DYNAMIC_CODE_FILENAME"))?;
     if filename.is_none() {
         // The original object, as cloudpickle 3.1: code objects defined in the
         // same file share (and memoize) their filename.
@@ -604,7 +652,11 @@ pub(crate) fn code_reduce<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, P
                 co_cellvars,
             ]
         };
-    Ok((g.code_type.bind(py), PyTuple::new(py, args)?)
+    // `types.CodeType`, looked up at call time like in upstream (its only
+    // global, read when it returns).
+    let code_type =
+        fallback::load_global(py, intern!(py, "types"))?.getattr(intern!(py, "CodeType"))?;
+    Ok((code_type, PyTuple::new(py, args)?)
         .into_pyobject(py)?
         .into_any())
 }

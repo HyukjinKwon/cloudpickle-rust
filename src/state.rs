@@ -9,7 +9,7 @@
 
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyModule, PySet, PyType};
+use pyo3::types::{PyDict, PyModule, PySet, PyString, PyType};
 
 /// Opcodes of the instructions referencing global variables.
 pub(crate) struct Opcodes {
@@ -33,8 +33,15 @@ pub(crate) struct Globals {
     // Our own module and its namespace.
     pub module: Py<PyModule>,
     pub module_dict: Py<PyDict>,
-    /// The type of the functions of this module (`builtin_function_or_method`).
-    pub builtin_function_type: Py<PyAny>,
+    /// The (Python) functions of the module, by address, with their name.
+    pub module_functions: std::collections::HashMap<usize, (Py<PyAny>, Py<PyString>)>,
+    /// `Pickler._function_reduce` (the Python function).
+    pub pickler_function_reduce: Py<PyAny>,
+    /// `Pickler._dynamic_function_reduce` and `Pickler._function_getnewargs`.
+    pub pickler_dynamic_function_reduce: Py<PyAny>,
+    pub pickler_function_getnewargs: Py<PyAny>,
+    /// `weakref.WeakKeyDictionary` and its `get` and `__setitem__` methods.
+    pub weak_key_dictionary: (Py<PyAny>, Py<PyAny>, Py<PyAny>),
 
     /// Running on PyPy (`PYPY` in upstream).
     pub pypy: bool,
@@ -52,7 +59,6 @@ pub(crate) struct Globals {
     pub builtins_dict: Py<PyDict>,
     pub types_module: Py<PyModule>,
     pub abc_module: Py<PyModule>,
-    pub io_module: Py<PyModule>,
     pub logging_module: Py<PyModule>,
     pub typing_module: Py<PyModule>,
     pub uuid_module: Py<PyModule>,
@@ -76,6 +82,8 @@ pub(crate) struct Globals {
     pub getattr: Py<PyAny>,
     pub id: Py<PyAny>,
     pub pickling_error: Py<PyType>,
+    /// `struct.pack`, the default value of a parameter of `Pickler.save_global`.
+    pub struct_pack: Py<PyAny>,
     /// `type(float.__new__.__code__)` on PyPy, None on CPython.
     pub builtin_code_type: Py<PyAny>,
 
@@ -84,7 +92,7 @@ pub(crate) struct Globals {
     pub tracker_by_class: Py<PyAny>,
     pub tracker_by_id: Py<PyAny>,
     pub tracker_lock: Py<PyAny>,
-    pub code_globals_cache: Py<PyDict>,
+    pub code_globals_cache: Py<PyAny>,
     pub builtin_type_names: Py<PyDict>,
     pub dataclass_sentinels: Py<PyDict>,
     pub empty_cell_value: Py<PyAny>,

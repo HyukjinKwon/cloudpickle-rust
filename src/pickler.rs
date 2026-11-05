@@ -10,11 +10,12 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyModule, PyString, PySuper, PyTuple, PyType};
 
+use crate::fallback::{self, load_global, Deps};
 use crate::lookup::should_pickle_by_reference;
 use crate::reconstructors::make_empty_cell;
 use crate::reducers::{class_reduce, dynamic_class_reduce, function_getstate};
 use crate::state::globals;
-use crate::utils::{add_function, add_method, fastcall_method, module_global, raise_from, Params};
+use crate::utils::{add_function, add_method, fastcall_method, raise_from, Params};
 
 type R<'py> = PyResult<Bound<'py, PyAny>>;
 type Args<'py> = [Option<Bound<'py, PyAny>>];
@@ -31,6 +32,65 @@ fn arg_or_none<'py>(py: Python<'py>, args: &Args<'py>, i: usize) -> Bound<'py, P
 
 fn none(py: Python<'_>) -> Bound<'_, PyAny> {
     py.None().into_bound(py)
+}
+
+/// `self.<name>(arg)`. When the method is the one of `Pickler` (not
+/// overridden by an attribute of the instance or of its class), its Rust
+/// implementation is called directly rather than through the Python function
+/// wrapping it, like the calls between the functions of the module.
+fn call_method<'py>(
+    slf: &Bound<'py, PyAny>,
+    name: &Bound<'py, PyString>,
+    original: &Py<PyAny>,
+    native: for<'a> fn(&'a Bound<'py, PyAny>, &'a Args<'py>) -> R<'py>,
+    arg: &Bound<'py, PyAny>,
+) -> R<'py> {
+    let py = slf.py();
+    let shadowed = match slf.getattr_opt(intern!(py, "__dict__"))? {
+        Some(instance_dict) => match instance_dict.cast::<PyDict>() {
+            Ok(instance_dict) => instance_dict.contains(name)?,
+            Err(_) => true,
+        },
+        None => false,
+    };
+    if shadowed || !slf.get_type().getattr(name)?.is(original.bind(py)) {
+        return slf.call_method1(name, (arg,));
+    }
+    native(slf, &[Some(arg.clone())])
+}
+
+/// Call the upstream implementation of a method (whose globals were
+/// replaced) with the arguments of the call: the required ones positionally,
+/// the others by keyword.
+fn call_upstream<'py>(
+    deps: &Deps,
+    params: &Params,
+    slf: &Bound<'py, PyAny>,
+    args: &Args<'py>,
+) -> R<'py> {
+    let py = slf.py();
+    let mut positional = vec![slf.clone()];
+    let kwargs = PyDict::new(py);
+    for (i, (name, value)) in params.names.iter().zip(args).enumerate() {
+        if let Some(value) = value {
+            if i < params.required {
+                positional.push(value.clone());
+            } else {
+                kwargs.set_item(name, value)?;
+            }
+        }
+    }
+    deps.call(py, PyTuple::new(py, positional)?, Some(&kwargs))
+}
+
+/// Run the upstream implementation of the method if one of the globals it
+/// reads was replaced.
+macro_rules! upstream_method_if_patched {
+    ($deps:expr, $params:expr, $slf:expr, $args:expr) => {
+        if !$deps.pristine($slf.py())? {
+            return call_upstream(&$deps, &$params, $slf, $args);
+        }
+    };
 }
 
 fn super_of<'py>(slf: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PySuper>> {
@@ -61,10 +121,22 @@ const DYNAMIC_FUNCTION_REDUCE: Params = Params {
 
 /// Reduce a function that is not pickleable via attribute lookup.
 fn dynamic_function_reduce<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(
+        fallback::PICKLER_DYNAMIC_FUNCTION_REDUCE,
+        DYNAMIC_FUNCTION_REDUCE,
+        slf,
+        args
+    );
     let func = arg(args, 0);
     let py = func.py();
     let g = globals(py);
-    let newargs = slf.call_method1(intern!(py, "_function_getnewargs"), (func,))?;
+    let newargs = call_method(
+        slf,
+        intern!(py, "_function_getnewargs"),
+        &g.pickler_function_getnewargs,
+        function_getnewargs,
+        func,
+    )?;
     let state = function_getstate(func)?;
     Ok((
         g.make_function.bind(py),
@@ -92,12 +164,24 @@ const FUNCTION_REDUCE: Params = Params {
 /// obj using a custom cloudpickle reducer designed specifically to handle
 /// dynamic functions.
 fn function_reduce<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(
+        fallback::PICKLER_FUNCTION_REDUCE,
+        FUNCTION_REDUCE,
+        slf,
+        args
+    );
     let obj = arg(args, 0);
     let py = obj.py();
-    if should_pickle_by_reference(obj, None)? {
+    if should_pickle_by_reference(obj, None)?.is_truthy()? {
         Ok(py.NotImplemented().into_bound(py))
     } else {
-        slf.call_method1(intern!(py, "_dynamic_function_reduce"), (obj,))
+        call_method(
+            slf,
+            intern!(py, "_dynamic_function_reduce"),
+            &globals(py).pickler_dynamic_function_reduce,
+            dynamic_function_reduce,
+            obj,
+        )
     }
 }
 
@@ -108,6 +192,12 @@ const FUNCTION_GETNEWARGS: Params = Params {
 };
 
 fn function_getnewargs<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(
+        fallback::PICKLER_FUNCTION_GETNEWARGS,
+        FUNCTION_GETNEWARGS,
+        slf,
+        args
+    );
     let func = arg(args, 0);
     let py = func.py();
     let code = func.getattr(intern!(py, "__code__"))?;
@@ -184,7 +274,10 @@ fn dump_method<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
         Ok(result) => Ok(result),
         Err(err) if err.is_instance_of::<PyRecursionError>(py) => {
             let msg = "Could not pickle object as excessively deep recursion required.";
-            let new = PyErr::from_type(globals(py).pickling_error.bind(py).clone(), msg);
+            // `raise pickle.PicklingError(msg) from e`
+            let pickling_error =
+                load_global(py, intern!(py, "pickle"))?.getattr(intern!(py, "PicklingError"))?;
+            let new = PyErr::from_value(pickling_error.call1((msg,))?);
             Err(raise_from(py, new, err))
         }
         Err(err) => Err(err),
@@ -203,7 +296,7 @@ fn init_method<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
     let mut protocol = arg_or_none(py, args, 1);
     let buffer_callback = arg_or_none(py, args, 2);
     if protocol.is_none() {
-        protocol = module_global(py, intern!(py, "DEFAULT_PROTOCOL"))?;
+        protocol = load_global(py, intern!(py, "DEFAULT_PROTOCOL"))?;
     }
     let kw = kwargs(
         py,
@@ -237,7 +330,19 @@ const REDUCER_OVERRIDE: Params = Params {
 };
 
 /// Type-agnostic reducing callback for function and classes.
+//
+// TODO: decorrelate reducer_override (which is tied to CPython's
+// implementation - would it make sense to backport it to pypy? - and
+// pickle's protocol 5 which is implementation agnostic. Currently, the
+// availability of both notions coincide on CPython's pickle, but it may not
+// be the case anymore when pypy implements protocol 5.
 fn reducer_override<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(
+        fallback::PICKLER_REDUCER_OVERRIDE,
+        REDUCER_OVERRIDE,
+        slf,
+        args
+    );
     let obj = arg(args, 0);
     let py = obj.py();
     // `issubclass(type(obj), type)`
@@ -245,34 +350,82 @@ fn reducer_override<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
         return class_reduce(obj);
     }
     if obj.is_instance(globals(py).function_type.bind(py))? {
-        return slf.call_method1(intern!(py, "_function_reduce"), (obj,));
+        if function_of_module_pickled_by_reference(slf, obj)? {
+            return Ok(py.NotImplemented().into_bound(py));
+        }
+        return call_method(
+            slf,
+            intern!(py, "_function_reduce"),
+            &globals(py).pickler_function_reduce,
+            function_reduce,
+            obj,
+        );
     }
     // fallback to save_global, including the Pickler's
     // dispatch_table
     Ok(py.NotImplemented().into_bound(py))
 }
 
-/// `reducer_override` of the PyPy implementation.
-///
-/// On CPython, the functions of this module (the reconstructors such as
-/// `_make_function`, `subimport`...) are saved by reference as module
-/// attributes: their `__reduce__` returns their name. On PyPy, cpyext
-/// functions reduce to `getattr(module, name)` instead, and the module itself
-/// reduces to `subimport(name)`, i.e. to one of these functions, which would
-/// recurse forever: reduce them to their name like on CPython. Everything else
-/// is left to the dispatch-based savers below, like in upstream.
-fn pypy_reducer_override<'py>(_slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
-    let obj = arg(args, 0);
+/// Whether `self._function_reduce(obj)` returns NotImplemented, with no other
+/// observable effect, because `obj` is one of the functions of this module
+/// (such as the reconstructors referenced by the payloads), pickled by
+/// reference: then the call is skipped. It is made in all the other cases
+/// (`_function_reduce` was overridden, a global read by the functions it calls
+/// was replaced, the function is not the attribute of its module...).
+fn function_of_module_pickled_by_reference<'py>(
+    slf: &Bound<'py, PyAny>,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<bool> {
     let py = obj.py();
     let g = globals(py);
-    if obj.get_type().is(g.builtin_function_type.bind(py)) {
-        if let Some(owner) = obj.getattr_opt(intern!(py, "__self__"))? {
-            if owner.is(g.module.bind(py)) {
-                return obj.getattr(intern!(py, "__name__"));
-            }
+    if !g.module_functions.contains_key(&(obj.as_ptr() as usize)) {
+        return Ok(false);
+    }
+    match slf
+        .getattr(intern!(py, "_function_reduce"))?
+        .getattr_opt(intern!(py, "__func__"))?
+    {
+        Some(method) if method.is(g.pickler_function_reduce.bind(py)) => {}
+        _ => return Ok(false),
+    }
+    for deps in [
+        &fallback::PICKLER_FUNCTION_REDUCE,
+        &fallback::SHOULD_PICKLE_BY_REFERENCE,
+        &fallback::LOOKUP_MODULE_AND_QUALNAME,
+        &fallback::WHICHMODULE,
+        &fallback::GETATTRIBUTE,
+        &fallback::IS_REGISTERED_PICKLE_BY_VALUE,
+    ] {
+        if !deps.pristine(py)? {
+            return Ok(false);
         }
     }
-    Ok(py.NotImplemented().into_bound(py))
+    // `_should_pickle_by_reference(obj)` returns True: `obj` is the attribute
+    // `obj.__qualname__` of the module `sys.modules[obj.__module__]`, which is
+    // not registered for pickling by value.
+    let module = g.module.bind(py);
+    let module_name = obj.getattr(intern!(py, "__module__"))?;
+    let qualname = obj.getattr(intern!(py, "__qualname__"))?;
+    if module_name.cast_exact::<PyString>().is_err() || qualname.cast_exact::<PyString>().is_err() {
+        return Ok(false);
+    }
+    let modules = g.sys.bind(py).getattr(intern!(py, "modules"))?;
+    let in_sys_modules = match modules.cast_exact::<PyDict>() {
+        Ok(modules) => modules
+            .get_item(&module_name)?
+            .is_some_and(|m| m.is(module)),
+        Err(_) => false,
+    };
+    if !in_sys_modules
+        || !g
+            .module_dict
+            .bind(py)
+            .get_item(&qualname)?
+            .is_some_and(|f| f.is(obj))
+    {
+        return Ok(false);
+    }
+    Ok(!crate::lookup::is_registered(module)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +448,12 @@ const SAVE_REDUCE_PICKLE5: Params = Params {
 };
 
 fn save_reduce_pickle5<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(
+        fallback::PICKLER_SAVE_REDUCE_PICKLE5,
+        SAVE_REDUCE_PICKLE5,
+        slf,
+        args
+    );
     let py = slf.py();
     let g = globals(py);
     let func = arg(args, 0);
@@ -382,6 +541,7 @@ const SAVE_GLOBAL: Params = Params {
 /// The name of this method is somewhat misleading: all types get
 /// dispatched here.
 fn save_global<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(fallback::PICKLER_SAVE_GLOBAL, SAVE_GLOBAL, slf, args);
     let py = slf.py();
     let g = globals(py);
     let obj = arg(args, 0);
@@ -422,7 +582,7 @@ fn save_global<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
 
     if !name.is_none() {
         super_save_global(slf, obj, &name)?;
-    } else if !should_pickle_by_reference(obj, Some(&name))? {
+    } else if !should_pickle_by_reference(obj, Some(&name))?.is_truthy()? {
         save_reduce_pickle5_of(slf, &dynamic_class_reduce(obj)?, obj)?;
     } else {
         super_save_global(slf, obj, &name)?;
@@ -441,11 +601,12 @@ const SAVE_FUNCTION: Params = Params {
 /// Determines what kind of function obj is (e.g. lambda, defined at
 /// interactive prompt, etc) and handles the pickling appropriately.
 fn save_function<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(fallback::PICKLER_SAVE_FUNCTION, SAVE_FUNCTION, slf, args);
     let py = slf.py();
     let g = globals(py);
     let obj = arg(args, 0);
     let name = arg_or_none(py, args, 1);
-    if should_pickle_by_reference(obj, Some(&name))? {
+    if should_pickle_by_reference(obj, Some(&name))?.is_truthy()? {
         super_save_global(slf, obj, &name)
     } else if g.pypy
         && obj
@@ -454,7 +615,13 @@ fn save_function<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
     {
         slf.call_method1(intern!(py, "save_pypy_builtin_func"), (obj,))
     } else {
-        let reduced = slf.call_method1(intern!(py, "_dynamic_function_reduce"), (obj,))?;
+        let reduced = call_method(
+            slf,
+            intern!(py, "_dynamic_function_reduce"),
+            &g.pickler_dynamic_function_reduce,
+            dynamic_function_reduce,
+            obj,
+        )?;
         save_reduce_pickle5_of(slf, &reduced, obj)
     }
 }
@@ -467,6 +634,12 @@ const SAVE_PYPY_BUILTIN_FUNC: Params = Params {
 
 /// Save pypy equivalent of builtin functions.
 fn save_pypy_builtin_func<'py>(slf: &Bound<'py, PyAny>, args: &Args<'py>) -> R<'py> {
+    upstream_method_if_patched!(
+        fallback::PICKLER_SAVE_PYPY_BUILTIN_FUNC,
+        SAVE_PYPY_BUILTIN_FUNC,
+        slf,
+        args
+    );
     let py = slf.py();
     let g = globals(py);
     let obj = arg(args, 0);
@@ -561,11 +734,6 @@ fastcall_method!(dump_c, DUMP, dump_method);
 fastcall_method!(init_c, INIT, init_method);
 fastcall_method!(reducer_override_c, REDUCER_OVERRIDE, reducer_override);
 fastcall_method!(
-    pypy_reducer_override_c,
-    REDUCER_OVERRIDE,
-    pypy_reducer_override
-);
-fastcall_method!(
     save_reduce_pickle5_c,
     SAVE_REDUCE_PICKLE5,
     save_reduce_pickle5
@@ -583,69 +751,25 @@ fastcall_method!(
     dispatch_table_getitem
 );
 
-const REDUCER_OVERRIDE_DOC: &std::ffi::CStr = c"reducer_override($self, obj)
---
-
-Type-agnostic reducing callback for function and classes.
-
-For performance reasons, subclasses of the C `pickle.Pickler` class
-cannot register custom reducers for functions and classes in the
-dispatch_table attribute. Reducers for such types must instead
-implemented via the special `reducer_override` method.
-
-Note that this method will be called for any object except a few
-builtin-types (int, lists, dicts etc.), which differs from reducers
-in the Pickler's dispatch_table, each of them being invoked for
-objects of a specific type only.
-
-This property comes in handy for classes: although most classes are
-instances of the ``type`` metaclass, some of them can be instances
-of other custom metaclasses (such as enum.EnumMeta for example). In
-particular, the metaclass will likely not be known in advance, and
-thus cannot be special-cased using an entry in the dispatch_table.
-reducer_override, among other things, allows us to register a
-reducer that will be called for any class, independently of its
-type.
-
-Notes:
-
-* reducer_override has the priority over dispatch_table-registered
-reducers.
-* reducer_override can be used to fix other limitations of
-  cloudpickle for other types that suffered from type-specific
-  reducers, such as Exceptions. See
-  https://github.com/cloudpipe/cloudpickle/issues/248";
-
-const FUNCTION_REDUCE_DOC: &std::ffi::CStr = c"_function_reduce($self, obj)
---
-
-Reducer for function objects.
-
-If obj is a top-level attribute of a file-backed module, this reducer
-returns NotImplemented, making the cloudpickle.Pickler fall back to
-traditional pickle.Pickler routines to save obj. Otherwise, it reduces
-obj using a custom cloudpickle reducer designed specifically to handle
-dynamic functions.";
-
-const SAVE_PYPY_BUILTIN_FUNC_DOC: &std::ffi::CStr = c"save_pypy_builtin_func($self, obj)
---
-
-Save pypy equivalent of builtin functions.
-
-PyPy does not have the concept of builtin-functions. Instead,
-builtin-functions are simple function instances, but with a
-builtin-code attribute.
-Most of the time, builtin functions should be pickled by attribute.
-But PyPy has flaky support for __qualname__, so some builtin
-functions such as float.__new__ will be classified as dynamic. For
-this reason only, we created this special routine. Because
-builtin-functions are not expected to have closure or globals,
-there is no additional hack (compared the one already implemented
-in pickle) to protect ourselves from reference cycles. A simple
-(reconstructor, newargs, obj.__dict__) tuple is save_reduced.  Note
-also that PyPy improved their support for __qualname__ in v3.6, so
-this routing should be removed when cloudpickle supports only PyPy
-3.6 and later.";
+/// The docstring of the method `name`: its text signature, then the docstring
+/// of the upstream method.
+fn method_doc(py: Python<'_>, name: &str, signature: &str) -> PyResult<&'static std::ffi::CStr> {
+    let doc = match crate::upstream_docs::PICKLER_METHODS
+        .iter()
+        .find(|(n, _)| *n == name)
+    {
+        Some((_, raw)) => crate::functions::compiled_doc(py, raw)?,
+        None => String::new(),
+    };
+    let text = format!("{name}{signature}\n--\n\n{doc}");
+    // Leaked on purpose: the method descriptors live until the end of the
+    // process.
+    Ok(Box::leak(
+        std::ffi::CString::new(text)
+            .expect("no NUL byte in docstrings")
+            .into_boxed_c_str(),
+    ))
+}
 
 /// Create the dispatch table and the `Pickler` class.
 ///
@@ -712,26 +836,53 @@ pub(crate) fn create_pickler_class<'py>(
         &pickler,
         c"_dynamic_function_reduce",
         dynamic_function_reduce_c,
-        c"_dynamic_function_reduce($self, func)\n--\n\nReduce a function that is not pickleable via attribute lookup.",
+        method_doc(py, "_dynamic_function_reduce", "($self, func)")?,
     )?;
     add_method(
         &pickler,
         c"_function_reduce",
         function_reduce_c,
-        FUNCTION_REDUCE_DOC,
+        method_doc(py, "_function_reduce", "($self, obj)")?,
     )?;
     add_method(
         &pickler,
         c"_function_getnewargs",
         function_getnewargs_c,
-        c"_function_getnewargs($self, func)\n--\n\n",
+        method_doc(py, "_function_getnewargs", "($self, func)")?,
     )?;
-    add_method(&pickler, c"dump", dump_c, c"dump($self, obj)\n--\n\n")?;
+    add_method(
+        &pickler,
+        c"dump",
+        dump_c,
+        method_doc(py, "dump", "($self, obj)")?,
+    )?;
     add_method(
         &pickler,
         c"__init__",
         init_c,
-        c"__init__($self, file, protocol=None, buffer_callback=None)\n--\n\n",
+        method_doc(
+            py,
+            "__init__",
+            "($self, file, protocol=None, buffer_callback=None)",
+        )?,
+    )?;
+
+    // Like upstream's, the methods are Python functions (calling their Rust
+    // implementation), except `reducer_override`, which the C pickler calls
+    // for every object: it stays a method descriptor.
+    crate::functions::install_methods(
+        m,
+        &pickler,
+        &[
+            ("_dynamic_function_reduce", "(self, func)"),
+            ("_function_reduce", "(self, obj)"),
+            ("_function_getnewargs", "(self, func)"),
+            ("dump", "(self, obj)"),
+            (
+                "__init__",
+                "(self, file, protocol=None, buffer_callback=None)",
+            ),
+        ],
     )?;
 
     if !pypy {
@@ -759,7 +910,7 @@ pub(crate) fn create_pickler_class<'py>(
             &pickler,
             c"reducer_override",
             reducer_override_c,
-            REDUCER_OVERRIDE_DOC,
+            method_doc(py, "reducer_override", "($self, obj)")?,
         )?;
     } else {
         // When reducer_override is not available, hack the pure-Python
@@ -768,39 +919,42 @@ pub(crate) fn create_pickler_class<'py>(
         // hard-coded call to save_global when pickling meta-classes.
         let dispatch = base.getattr("dispatch")?.call_method0("copy")?;
         pickler.setattr("dispatch", &dispatch)?;
-        add_method(
+        const SAVE_REDUCE_PICKLE5_SIGNATURE: &str = "(self, func, args, state=None, \
+            listitems=None, dictitems=None, state_setter=None, obj=None)";
+        for (name, c_name, method) in [
+            (
+                "_save_reduce_pickle5",
+                c"_save_reduce_pickle5",
+                save_reduce_pickle5_c as crate::utils::MethFastcall,
+            ),
+            ("save_global", c"save_global", save_global_c),
+            ("save_function", c"save_function", save_function_c),
+            (
+                "save_pypy_builtin_func",
+                c"save_pypy_builtin_func",
+                save_pypy_builtin_func_c,
+            ),
+        ] {
+            add_method(
+                &pickler,
+                c_name,
+                method,
+                method_doc(py, name, "($self, *args)")?,
+            )?;
+        }
+        crate::functions::install_methods(
+            m,
             &pickler,
-            c"_save_reduce_pickle5",
-            save_reduce_pickle5_c,
-            c"_save_reduce_pickle5($self, func, args, state=None, listitems=None, dictitems=None, state_setter=None, obj=None)\n--\n\n",
+            &[
+                ("_save_reduce_pickle5", SAVE_REDUCE_PICKLE5_SIGNATURE),
+                ("save_global", "(self, obj, name=None, pack=struct.pack)"),
+                ("save_function", "(self, obj, name=None)"),
+                ("save_pypy_builtin_func", "(self, obj)"),
+            ],
         )?;
-        let save_global = add_method(
-            &pickler,
-            c"save_global",
-            save_global_c,
-            c"save_global($self, obj, name=None, pack=None)\n--\n\nMain dispatch method.\n\nThe name of this method is somewhat misleading: all types get\ndispatched here.",
-        )?;
-        dispatch.set_item(&type_type, save_global)?;
-        let save_function = add_method(
-            &pickler,
-            c"save_function",
-            save_function_c,
-            c"save_function($self, obj, name=None)\n--\n\nRegistered with the dispatch to handle all function types.\n\nDetermines what kind of function obj is (e.g. lambda, defined at\ninteractive prompt, etc) and handles the pickling appropriately.",
-        )?;
-        add_method(
-            &pickler,
-            c"save_pypy_builtin_func",
-            save_pypy_builtin_func_c,
-            SAVE_PYPY_BUILTIN_FUNC_DOC,
-        )?;
+        dispatch.set_item(&type_type, pickler.getattr("save_global")?)?;
         let function_type = py.import("types")?.getattr("FunctionType")?;
-        dispatch.set_item(function_type, save_function)?;
-        add_method(
-            &pickler,
-            c"reducer_override",
-            pypy_reducer_override_c,
-            c"reducer_override($self, obj)\n--\n\nSave the functions of this module by reference (cpyext functions do not\nreduce to their name on PyPy).",
-        )?;
+        dispatch.set_item(function_type, pickler.getattr("save_function")?)?;
     }
     Ok((pickler, dispatch_table_type))
 }
@@ -846,7 +1000,7 @@ fn dump<'py>(
 ) -> PyResult<()> {
     let py = obj.py();
     let kw = pickler_kwargs(py, protocol, buffer_callback)?;
-    module_global(py, intern!(py, "Pickler"))?
+    load_global(py, intern!(py, "Pickler"))?
         .call((file,), Some(&kw))?
         .call_method1(intern!(py, "dump"), (obj,))?;
     Ok(())
@@ -871,11 +1025,8 @@ fn dumps<'py>(
     buffer_callback: Option<&Bound<'py, PyAny>>,
 ) -> R<'py> {
     let py = obj.py();
-    let g = globals(py);
     // with io.BytesIO() as file:
-    let manager = g
-        .io_module
-        .bind(py)
+    let manager = load_global(py, intern!(py, "io"))?
         .getattr(intern!(py, "BytesIO"))?
         .call0()?;
     let exit = manager.get_type().getattr(intern!(py, "__exit__"))?;
@@ -885,7 +1036,7 @@ fn dumps<'py>(
         .call1((&manager,))?;
     let body = || -> R<'py> {
         let kw = pickler_kwargs(py, protocol, buffer_callback)?;
-        let cp = module_global(py, intern!(py, "Pickler"))?.call((&file,), Some(&kw))?;
+        let cp = load_global(py, intern!(py, "Pickler"))?.call((&file,), Some(&kw))?;
         cp.call_method1(intern!(py, "dump"), (obj,))?;
         file.call_method0(intern!(py, "getvalue"))
     };
