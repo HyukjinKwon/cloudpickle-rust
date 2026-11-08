@@ -552,6 +552,24 @@ pub(crate) fn resolve_all(py: Python<'_>, module_dict: &Bound<'_, PyDict>) -> Py
 const UPSTREAM_SOURCE: &str = include_str!("upstream/cloudpickle.py");
 const UPSTREAM_FILENAME: &str = "<cloudpickle_rust: upstream cloudpickle/cloudpickle.py>";
 
+/// The number of the line of upstream's `cloudpickle.py` where `start` (the
+/// beginning of a line) is (the `__firstlineno__` of the classes defined
+/// there on Python 3.13+), and the definition that starts there: up to the
+/// next two blank lines.
+pub(crate) fn upstream_definition(start: &str) -> PyResult<(usize, &'static str)> {
+    let offset = UPSTREAM_SOURCE
+        .find(&format!("\n{start}"))
+        .ok_or_else(|| PyRuntimeError::new_err(format!("{start:?} is not in upstream's source")))?;
+    // The definition starts after the newline at `offset`.
+    let line = UPSTREAM_SOURCE[..=offset].matches('\n').count() + 1;
+    let definition = &UPSTREAM_SOURCE[offset + 1..];
+    // Up to the end of its last line.
+    let end = definition
+        .find("\n\n\n")
+        .map_or(definition.len(), |end| end + 1);
+    Ok((line, &definition[..end]))
+}
+
 static UPSTREAM_FUNCTIONS: PyOnceLock<Py<PyDict>> = PyOnceLock::new();
 
 fn upstream_function<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
