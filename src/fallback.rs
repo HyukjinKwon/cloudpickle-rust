@@ -556,18 +556,21 @@ const UPSTREAM_FILENAME: &str = "<cloudpickle_rust: upstream cloudpickle/cloudpi
 /// beginning of a line) is (the `__firstlineno__` of the classes defined
 /// there on Python 3.13+), and the definition that starts there: up to the
 /// next two blank lines.
-pub(crate) fn upstream_definition(start: &str) -> PyResult<(usize, &'static str)> {
-    let offset = UPSTREAM_SOURCE
+pub(crate) fn upstream_definition(start: &str) -> PyResult<(usize, String)> {
+    // The source has CRLF line endings when the repository was checked out
+    // with them (by default on Windows).
+    let source = UPSTREAM_SOURCE.replace("\r\n", "\n");
+    let offset = source
         .find(&format!("\n{start}"))
         .ok_or_else(|| PyRuntimeError::new_err(format!("{start:?} is not in upstream's source")))?;
     // The definition starts after the newline at `offset`.
-    let line = UPSTREAM_SOURCE[..=offset].matches('\n').count() + 1;
-    let definition = &UPSTREAM_SOURCE[offset + 1..];
+    let line = source[..=offset].matches('\n').count() + 1;
+    let definition = &source[offset + 1..];
     // Up to the end of its last line.
     let end = definition
         .find("\n\n\n")
         .map_or(definition.len(), |end| end + 1);
-    Ok((line, &definition[..end]))
+    Ok((line, definition[..end].to_owned()))
 }
 
 static UPSTREAM_FUNCTIONS: PyOnceLock<Py<PyDict>> = PyOnceLock::new();
