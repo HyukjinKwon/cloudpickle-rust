@@ -228,6 +228,12 @@ pickled:
   can reach the recursion limit at a slightly different depth.
 - The docstring of the module also states the license of cloudpickle-rust
   (unless docstrings are removed, with `python -OO`).
+- Like other PyO3 extension modules
+  ([PyO3/pyo3#576](https://github.com/PyO3/pyo3/issues/576)),
+  `cloudpickle_rust` cannot be imported in subinterpreters (for instance the
+  ones of `concurrent.interpreters`, new in Python 3.14): it raises
+  `ImportError` there, while upstream cloudpickle can be used in any
+  interpreter.
 
 One extension, which upstream does not have:
 

@@ -466,6 +466,25 @@ def test_docstrings_with_optimizations(flags):
     assert docs == expected
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="concurrent.interpreters is new in Python 3.14"
+)
+def test_subinterpreters_are_not_supported():
+    # A documented difference with upstream (see README.md): PyO3 extension
+    # modules cannot be imported in subinterpreters yet (PyO3/pyo3#576).
+    from concurrent import interpreters
+
+    interpreter = interpreters.create()
+    try:
+        with pytest.raises(
+            interpreters.ExecutionFailed,
+            match="does not support loading in subinterpreters",
+        ):
+            interpreter.exec("import cloudpickle_rust")
+    finally:
+        interpreter.close()
+
+
 # ---------------------------------------------------------------------------
 # Call-time lookups of the globals: the functions of upstream's module read
 # its globals (and the attributes of the modules it imported) when they run,
