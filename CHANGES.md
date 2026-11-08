@@ -6,6 +6,13 @@ In development
   Like upstream's, the functions and methods of the module then have no
   docstring, and neither does the module.
 
+- Pickling a class no longer fails when another thread loads a payload of the
+  same class meanwhile, which sets the attributes of the class again: the
+  `__dict__` of the class (and of its bases) is read once, as a snapshot. On
+  free-threaded Python, upstream cloudpickle can then raise
+  `KeyError: '__firstlineno__'` or `RuntimeError: dictionary changed size
+  during iteration`.
+
 0.3.0
 =====
 

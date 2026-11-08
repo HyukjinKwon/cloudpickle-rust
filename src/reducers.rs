@@ -12,7 +12,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule, PyString, PyTuple};
+use pyo3::types::{PyDict, PyList, PyMappingProxy, PyModule, PyString, PyTuple};
 
 use crate::code::{
     extract_code_globals, find_imported_submodules, find_imported_submodules_native, is_code,
@@ -37,10 +37,30 @@ fn not_implemented(py: Python<'_>) -> Bound<'_, PyAny> {
 // Classes
 // ---------------------------------------------------------------------------
 
+/// `obj.__dict__` of a class, as a snapshot.
+///
+/// Upstream reads the `__dict__` of the class (and of its bases) several
+/// times, which can raise `KeyError` (or `RuntimeError` while iterating over
+/// it) if another thread changes it meanwhile: for instance `_class_setstate`,
+/// which sets the attributes of a tracked class again when a payload of the
+/// same class is loaded (on Python 3.13+, setting `__module__` also deletes
+/// `__firstlineno__`). `mappingproxy.copy()` copies the namespace of the class
+/// atomically, also on free-threaded builds; the result is the same as
+/// upstream's when the class does not change.
+fn class_namespace<'py>(cls: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = cls.py();
+    let namespace = cls.getattr(intern!(py, "__dict__"))?;
+    if namespace.is_exact_instance_of::<PyMappingProxy>() {
+        namespace.call_method0(intern!(py, "copy"))
+    } else {
+        Ok(namespace)
+    }
+}
+
 /// Retrieve a copy of the dict of a class without the inherited method.
 pub(crate) fn extract_class_dict<'py>(cls: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
     let py = cls.py();
-    let cls_dict = cls.getattr(intern!(py, "__dict__"))?;
+    let cls_dict = class_namespace(cls)?;
     // Hack to circumvent non-predictable memoization caused by string interning.
     // See the inline comment in _class_setstate for details.
     let keys = py
@@ -56,7 +76,7 @@ pub(crate) fn extract_class_dict<'py>(cls: &Bound<'py, PyAny>) -> PyResult<Bound
 
     let bases = cls.getattr(intern!(py, "__bases__"))?;
     let inherited_dict = if bases.len()? == 1 {
-        bases.get_item(0)?.getattr(intern!(py, "__dict__"))?
+        class_namespace(&bases.get_item(0)?)?
     } else {
         let inherited = PyDict::new(py);
         let reversed = globals(py)
@@ -64,10 +84,7 @@ pub(crate) fn extract_class_dict<'py>(cls: &Bound<'py, PyAny>) -> PyResult<Bound
             .bind(py)
             .getattr(intern!(py, "reversed"))?;
         for base in reversed.call1((&bases,))?.try_iter()? {
-            inherited.call_method1(
-                intern!(py, "update"),
-                (base?.getattr(intern!(py, "__dict__"))?,),
-            )?;
+            inherited.call_method1(intern!(py, "update"), (class_namespace(&base?)?,))?;
         }
         inherited.into_any()
     };

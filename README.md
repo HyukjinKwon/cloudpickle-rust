@@ -217,6 +217,11 @@ pickled:
   encoding of the global-referencing instructions is measured when the module
   is imported) rather than with `dis.get_instructions`, and returns an
   iterator rather than a generator.
+- `_extract_class_dict` reads a snapshot of the `__dict__` of the class (and
+  of its bases) rather than reading it several times: pickling a class does
+  not fail when another thread loads a payload of the same class meanwhile
+  (which sets the attributes of the class again), while upstream can raise
+  `KeyError` or `RuntimeError` on free-threaded builds.
 - The builtins (`isinstance`, `getattr`, ...) are not part of the globals
   checked by the Rust functions: shadowing them with globals of
   `cloudpickle_rust.cloudpickle`, or replacing them in the `builtins` module,
