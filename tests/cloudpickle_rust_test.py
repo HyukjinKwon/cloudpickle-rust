@@ -411,6 +411,61 @@ def test_gil_is_not_enabled_by_import():
     assert out == gil_enabled_by_default
 
 
+_DOCSTRINGS_SCRIPT = """
+import json, pickle, types
+import {module} as cp
+
+mod = cp.cloudpickle
+docs = {{"<package>": cp.__doc__, "<module>": mod.__doc__}}
+for name, value in vars(mod).items():
+    if isinstance(value, types.FunctionType) and value.__module__ == mod.__name__:
+        docs[name] = value.__doc__
+for name, value in vars(mod.Pickler).items():
+    if callable(value) and not isinstance(value, type):
+        docs["Pickler." + name] = value.__doc__
+
+
+class C:
+    def method(self):
+        return 2
+
+
+assert pickle.loads(cp.dumps(lambda x: x + C().method()))(1) == 3
+print(json.dumps(docs))
+"""
+
+
+def _docstrings(module, flags):
+    """The docstrings of module (cloudpickle or cloudpickle_rust) and of its
+    functions and Pickler methods, in a Python process run with flags."""
+    import json
+    import subprocess
+
+    script = _DOCSTRINGS_SCRIPT.format(module=module)
+    return json.loads(subprocess.check_output([sys.executable, *flags, "-c", script]))
+
+
+@pytest.mark.parametrize("flags", [(), ("-O",), ("-OO",)])
+def test_docstrings_with_optimizations(flags):
+    # python -OO removes the docstrings: cloudpickle-rust must still import
+    # (0.3.0 did not) and, like upstream's, its functions and methods then
+    # have no docstring.
+    docs = _docstrings("cloudpickle_rust", flags)
+    assert len(docs) > 60
+    if flags == ("-OO",):
+        assert all(doc is None for doc in docs.values()), docs
+    else:
+        assert docs["dumps"].startswith("Serialize obj as a string of bytes")
+    _upstream_cloudpickle()
+    expected = _docstrings("cloudpickle", flags)
+    if flags != ("-OO",):
+        # The docstring of the module also states the license of
+        # cloudpickle-rust.
+        for docstrings in (docs, expected):
+            del docstrings["<package>"], docstrings["<module>"]
+    assert docs == expected
+
+
 # ---------------------------------------------------------------------------
 # Call-time lookups of the globals: the functions of upstream's module read
 # its globals (and the attributes of the modules it imported) when they run,

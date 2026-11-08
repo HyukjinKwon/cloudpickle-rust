@@ -29,7 +29,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule, PySet, PyString, PyTuple, PyType};
 
 use crate::state::{Globals, Opcodes, GLOBALS};
-use crate::utils::set_attr;
+use crate::utils::{docstrings_removed, set_attr};
 
 const MODULE_DOC: &str = r#"Pickler class to extend the standard pickle.Pickler functionality
 
@@ -130,7 +130,11 @@ fn cloudpickle_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     let py = m.py();
-    m.setattr("__doc__", MODULE_DOC)?;
+    if docstrings_removed(py)? {
+        m.setattr("__doc__", py.None())?;
+    } else {
+        m.setattr("__doc__", MODULE_DOC)?;
+    }
 
     // The modules imported by upstream, which are also part of its namespace
     // (and thus, through `from .cloudpickle import *`, of the package's).

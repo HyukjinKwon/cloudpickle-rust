@@ -182,6 +182,18 @@ pub(crate) fn set_attr<'py>(
     m.setattr(name, value)
 }
 
+/// Whether the compiler removes the docstrings (`python -OO`). The module and
+/// the classes created by cloudpickle-rust then have no docstring either,
+/// like upstream's module, whose docstrings the compiler removes.
+pub(crate) fn docstrings_removed(py: Python<'_>) -> PyResult<bool> {
+    let optimize: i64 = py
+        .import("sys")?
+        .getattr("flags")?
+        .getattr("optimize")?
+        .extract()?;
+    Ok(optimize >= 2)
+}
+
 /// Register a `#[pyfunction]` in the module under its Python name.
 pub(crate) fn add_function(m: &Bound<'_, PyModule>, f: Bound<'_, PyCFunction>) -> PyResult<()> {
     let name = f.getattr(pyo3::intern!(m.py(), "__name__"))?;

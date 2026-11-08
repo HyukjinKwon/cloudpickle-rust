@@ -226,7 +226,8 @@ pickled:
   tracebacks, `dumps` passes `None` rather than a traceback to the `__exit__`
   method of its `io.BytesIO` for such exceptions, and deeply nested objects
   can reach the recursion limit at a slightly different depth.
-- The docstring of the module also states the license of cloudpickle-rust.
+- The docstring of the module also states the license of cloudpickle-rust
+  (unless docstrings are removed, with `python -OO`).
 
 One extension, which upstream does not have:
 

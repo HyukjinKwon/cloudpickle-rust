@@ -15,7 +15,9 @@ use crate::lookup::should_pickle_by_reference;
 use crate::reconstructors::make_empty_cell;
 use crate::reducers::{class_reduce, dynamic_class_reduce, function_getstate};
 use crate::state::globals;
-use crate::utils::{add_function, add_method, fastcall_method, raise_from, Params};
+use crate::utils::{
+    add_function, add_method, docstrings_removed, fastcall_method, raise_from, Params,
+};
 
 type R<'py> = PyResult<Bound<'py, PyAny>>;
 type Args<'py> = [Option<Bound<'py, PyAny>>];
@@ -752,13 +754,14 @@ fastcall_method!(
 );
 
 /// The docstring of the method `name`: its text signature, then the docstring
-/// of the upstream method.
+/// of the upstream method. Without the latter (none upstream, or the compiler
+/// removes docstrings: `python -OO`), the `__doc__` of the method is None.
 fn method_doc(py: Python<'_>, name: &str, signature: &str) -> PyResult<&'static std::ffi::CStr> {
     let doc = match crate::upstream_docs::PICKLER_METHODS
         .iter()
         .find(|(n, _)| *n == name)
     {
-        Some((_, raw)) => crate::functions::compiled_doc(py, raw)?,
+        Some((_, raw)) => crate::functions::compiled_doc(py, raw)?.unwrap_or_default(),
         None => String::new(),
     };
     let text = format!("{name}{signature}\n--\n\n{doc}");
@@ -788,12 +791,14 @@ pub(crate) fn create_pickler_class<'py>(
     let ns = PyDict::new(py);
     ns.set_item("__module__", &module_name)?;
     ns.set_item("__qualname__", "_DispatchTable")?;
-    ns.set_item(
-        "__doc__",
-        "ChainMap used as the dispatch_table of cloudpickle's Pickler.\n\n\
-         Same as collections.ChainMap but with a native __getitem__, which is\n\
-         called by the pickler for every object not handled by reducer_override.",
-    )?;
+    if !docstrings_removed(py)? {
+        ns.set_item(
+            "__doc__",
+            "ChainMap used as the dispatch_table of cloudpickle's Pickler.\n\n\
+             Same as collections.ChainMap but with a native __getitem__, which is\n\
+             called by the pickler for every object not handled by reducer_override.",
+        )?;
+    }
     ns.set_item("__slots__", PyTuple::empty(py))?;
     let dispatch_table_type = type_type
         .call1(("_DispatchTable", (chain_map,), ns))?
