@@ -828,6 +828,13 @@ pub(crate) fn create_pickler_class<'py>(
     ns.set_item("__module__", &module_name)?;
     ns.set_item("__qualname__", "Pickler")?;
     ns.set_item("__doc__", py.None())?;
+    if py.version_info() >= (3, 13) {
+        // Set by the compiler for upstream's class statement: its line, and
+        // the attributes that its methods set on `self`.
+        let (line, _) = fallback::upstream_definition("class Pickler(pickle.Pickler):")?;
+        ns.set_item("__firstlineno__", line)?;
+        ns.set_item("__static_attributes__", ("globals_ref", "proto"))?;
+    }
     // set of reducers defined and used by cloudpickle (private)
     ns.set_item("_dispatch_table", dispatch)?;
     ns.set_item("dispatch_table", &dispatch_table)?;

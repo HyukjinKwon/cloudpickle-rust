@@ -191,7 +191,10 @@ Compatibility with cloudpickle
   cloudpickle, except for the module of the reconstructors.
 - **Same test results.** The test-suite of this repository is the upstream
   test-suite, where only `import cloudpickle` was replaced by
-  `import cloudpickle_rust as cloudpickle`. On CPython 3.8 to 3.14 and
+  `import cloudpickle_rust as cloudpickle`, and whose pickles of
+  `tests/old_pickles` (which reference the module of the reconstructors) were
+  generated with cloudpickle-rust 0.1.0 by `tests/generate_old_pickles.py`.
+  On CPython 3.8 to 3.14 and
   free-threaded 3.13t and 3.14t, every test has the same outcome (pass, skip
   or expected failure) as with upstream cloudpickle. Additional tests compare
   the payloads, the functions and the behavior when globals are replaced with

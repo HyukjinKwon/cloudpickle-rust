@@ -152,6 +152,13 @@ def test_module_namespace_matches_upstream():
     assert upstream_names == rust_names
     assert set(vars(cloudpickle)) == set(vars(cloudpickle_rust))
     assert cloudpickle.__all__ == cloudpickle_rust.__all__
+    # The namespace of Pickler too, including the attributes set by the
+    # compiler for upstream's class statement on Python 3.13+.
+    upstream_pickler = vars(cloudpickle.Pickler)
+    rust_pickler = vars(cloudpickle_rust.Pickler)
+    assert set(upstream_pickler) == set(rust_pickler)
+    for name in ["__firstlineno__", "__static_attributes__", "__doc__"]:
+        assert rust_pickler.get(name) == upstream_pickler.get(name), name
 
 
 _UUID = re.compile(r"^[0-9a-f]{32}$")
@@ -267,14 +274,155 @@ def _parity_objects():
     ]
 
 
-@pytest.mark.parametrize("protocol", [2, 3, 4, 5])
+_MORE_PARITY_SOURCE = """
+import abc, collections, dataclasses, enum, sys, typing
+
+
+def positional_only(a, b=1, /, c=2, *, d=3):
+    return a + b + c + d
+
+
+def generator(n):
+    yield from range(n)
+
+
+async def coroutine():
+    return 1
+
+
+class Meta(type):
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        return super().__new__(mcs, name, bases, namespace)
+
+
+class WithMeta(metaclass=Meta):
+    attribute = 1
+
+
+class Planet(enum.Enum):
+    EARTH = (1, 2)
+    MARS = (3, 4)
+
+    def __init__(self, mass, radius):
+        self.mass, self.radius = mass, radius
+
+
+class Permission(enum.IntFlag):
+    R = 4
+    W = 2
+
+
+class Point(typing.NamedTuple):
+    x: int
+    y: int = 0
+
+
+class Movie(typing.TypedDict):
+    title: str
+
+
+class SupportsClose(typing.Protocol):
+    def close(self) -> None: ...
+
+
+class Abstract(abc.ABC):
+    @abc.abstractclassmethod
+    def acm(cls): ...
+
+    @abc.abstractstaticmethod
+    def asm(): ...
+
+
+Pair = collections.namedtuple("Pair", "a b")
+"""
+
+_MORE_PARITY_SOURCE_310 = """
+@dataclasses.dataclass(slots=True, kw_only=True)
+class SlotsDataClass:
+    a: int = 1
+    b: list = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class KwOnlyDataClass:
+    a: int
+    _: dataclasses.KW_ONLY
+    b: int = 2
+"""
+
+_MORE_PARITY_SOURCE_311 = """
+class Letter(enum.StrEnum):
+    A = enum.auto()
+"""
+
+_MORE_PARITY_SOURCE_312 = """
+class Generic695[T]:
+    def method(self, x: T) -> T:
+        return x
+
+
+def generic695[T: int](x: T) -> T:
+    return x
+"""
+
+
+def _more_parity_objects():
+    """More kinds of objects, defined in a module that is not importable, for
+    test_payloads_identical_to_upstream only (_parity_objects is also used by
+    slower tests)."""
+    import weakref
+
+    source = _MORE_PARITY_SOURCE
+    if sys.version_info >= (3, 10):
+        source += _MORE_PARITY_SOURCE_310
+    if sys.version_info >= (3, 11):
+        source += _MORE_PARITY_SOURCE_311
+    if sys.version_info >= (3, 12):
+        source += _MORE_PARITY_SOURCE_312
+    namespace = {"__name__": "_cloudpickle_rust_parity_module"}
+    exec(compile(source, "<parity>", "exec"), namespace)
+    objects = [
+        value
+        for name, value in namespace.items()
+        if not name.startswith("__") and not isinstance(value, types.ModuleType)
+    ]
+    objects += [
+        namespace["Planet"].EARTH,
+        namespace["Permission"].R | namespace["Permission"].W,
+        namespace["Point"](1),
+        namespace["Pair"](1, 2),
+        namespace["WithMeta"](),
+        weakref.WeakSet([namespace["WithMeta"]]),
+        collections.OrderedDict(a=1).values(),
+        property(namespace["positional_only"], None, None, "doc"),
+        classmethod(namespace["generator"]),
+        staticmethod(namespace["coroutine"]),
+    ]
+    if sys.version_info >= (3, 10):
+        objects.append(namespace["SlotsDataClass"]())
+    if sys.version_info >= (3, 12):
+        objects += [namespace["Generic695"][int], namespace["Generic695"]()]
+    return objects
+
+
+@pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
 def test_payloads_identical_to_upstream(protocol):
     cloudpickle = _upstream_cloudpickle()
-    for obj in _parity_objects():
-        expected = _normalized_opcodes(cloudpickle.dumps(obj, protocol=protocol))
-        payload = cloudpickle_rust.dumps(obj, protocol=protocol)
-        assert _normalized_opcodes(payload) == expected, obj
-        pickle.loads(payload)
+    for obj in _parity_objects() + _more_parity_objects():
+        expected = _outcome(
+            lambda: _normalized_opcodes(cloudpickle.dumps(obj, protocol=protocol))
+        )
+        outcome = _outcome(
+            lambda: _normalized_opcodes(cloudpickle_rust.dumps(obj, protocol=protocol))
+        )
+        assert outcome == expected, obj
+        if isinstance(outcome, list):
+            pickle.loads(cloudpickle_rust.dumps(obj, protocol=protocol))
+        else:
+            # Protocols 0 and 1 cannot pickle some objects, for instance the
+            # InitVar of dataclasses (which define __slots__): the exception
+            # is then upstream's.
+            assert protocol < 2, (obj, outcome)
 
 
 def _function_with_nested_code():
@@ -802,9 +950,12 @@ def test_empty_cell_value_is_an_instance_of_a_python_class():
     assert type(cloudpickle_rust.cloudpickle._empty_cell_value).__module__ == (
         "cloudpickle_rust.cloudpickle"
     )
-    assert set(vars(type(cloudpickle.cloudpickle._empty_cell_value))) == set(
-        vars(type(cloudpickle_rust.cloudpickle._empty_cell_value))
-    )
+    upstream_class = vars(type(cloudpickle.cloudpickle._empty_cell_value))
+    rust_class = vars(type(cloudpickle_rust.cloudpickle._empty_cell_value))
+    assert set(upstream_class) == set(rust_class)
+    # Including the attributes set by the compiler on Python 3.13+.
+    for name in ["__firstlineno__", "__static_attributes__"]:
+        assert rust_class.get(name) == upstream_class.get(name), name
 
 
 def test_error_messages_are_upstream_ones():

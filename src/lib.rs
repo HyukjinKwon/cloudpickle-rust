@@ -89,16 +89,6 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 "#;
 
-/// Upstream's definition of the sentinel class (whose instance replaces it,
-/// as upstream's `@instance` decorator does).
-const EMPTY_CELL_VALUE_CLASS: &std::ffi::CStr = c"class _empty_cell_value:
-    \"\"\"Sentinel for empty closures.\"\"\"
-
-    @classmethod
-    def __reduce__(cls):
-        return cls.__name__
-";
-
 #[pymodule(gil_used = false)]
 #[pyo3(name = "cloudpickle")]
 fn cloudpickle_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -283,13 +273,18 @@ fn init_module(m: &Bound<'_, PyModule>) -> PyResult<Globals> {
     }
 
     reconstructors::register(m)?;
-    // `_empty_cell_value` is an instance of a Python class, like upstream's
-    // (whose class statement is executed in the namespace of the module).
-    py.run(EMPTY_CELL_VALUE_CLASS, Some(&m.dict()), None)?;
-    let empty_cell_value = m
-        .getattr("instance")?
-        .call1((m.getattr("_empty_cell_value")?,))?;
-    set_attr(m, "_empty_cell_value", &empty_cell_value)?;
+    // `_empty_cell_value` is an instance of a Python class, like upstream's:
+    // its definition (decorated with `instance`) is executed in the namespace
+    // of the module, at the same line as upstream's (the `__firstlineno__` of
+    // the class on Python 3.13+).
+    let (line, definition) = fallback::upstream_definition("@instance\nclass _empty_cell_value:")?;
+    let source = format!("{}{definition}", "\n".repeat(line - 1));
+    py.run(
+        &std::ffi::CString::new(source).expect("no NUL byte in upstream's source"),
+        Some(&m.dict()),
+        None,
+    )?;
+    let empty_cell_value = m.getattr("_empty_cell_value")?;
 
     reducers::register(m)?;
 

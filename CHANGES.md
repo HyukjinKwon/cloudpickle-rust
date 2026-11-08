@@ -13,6 +13,13 @@ In development
   `KeyError: '__firstlineno__'` or `RuntimeError: dictionary changed size
   during iteration`.
 
+- On Python 3.13 and later, `Pickler` and the class of `_empty_cell_value`
+  have the `__firstlineno__` and `__static_attributes__` of upstream's class
+  statements, whose code defines `_empty_cell_value`.
+
+- The type stub of `_extract_code_globals_cache` is the
+  `weakref.WeakKeyDictionary` that it is since 0.3.0.
+
 0.3.0
 =====
 

@@ -44,9 +44,9 @@ _PICKLE_BY_VALUE_MODULES: Set[str]
 _DYNAMIC_CLASS_TRACKER_BY_CLASS: "weakref.WeakKeyDictionary[Any, str]"
 _DYNAMIC_CLASS_TRACKER_BY_ID: "weakref.WeakValueDictionary[str, Any]"
 _DYNAMIC_CLASS_TRACKER_LOCK: threading.Lock
-_extract_code_globals_cache: Dict[
-    int, Tuple["weakref.ref[types.CodeType]", Dict[str, None]]
-]
+_extract_code_globals_cache: (
+    "weakref.WeakKeyDictionary[types.CodeType, Dict[str, None]]"
+)
 _BUILTIN_TYPE_NAMES: Dict[type, str]
 _DATACLASSE_FIELD_TYPE_SENTINELS: Dict[str, Any]
 _empty_cell_value: Any
