@@ -411,6 +411,45 @@ def test_gil_is_not_enabled_by_import():
     assert out == gil_enabled_by_default
 
 
+def test_pickling_a_class_while_other_threads_load_it():
+    # Loading a payload of a tracked class sets its attributes again
+    # (_class_setstate), which changes its __dict__: on Python 3.13+, setting
+    # __module__ also deletes __firstlineno__ until it is set again. Pickling
+    # the class meanwhile in another thread must not fail: cloudpickle-rust
+    # reads a snapshot of the __dict__ of the class, while upstream cloudpickle
+    # reads it several times and can raise KeyError or RuntimeError (on
+    # free-threaded builds, where the threads run in parallel).
+    import threading
+
+    class Tracked:
+        attribute = 1
+
+        def method(self):
+            return self.attribute
+
+    payload = cloudpickle_rust.dumps(Tracked)
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def work(load):
+        try:
+            barrier.wait()
+            for _ in range(100):
+                if load:
+                    assert pickle.loads(payload) is Tracked
+                else:
+                    assert pickle.loads(cloudpickle_rust.dumps(Tracked)) is Tracked
+        except Exception as e:  # noqa
+            errors.append(e)
+
+    threads = [threading.Thread(target=work, args=(i % 2 == 0,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors, errors
+
+
 _DOCSTRINGS_SCRIPT = """
 import json, pickle, types
 import {module} as cp
