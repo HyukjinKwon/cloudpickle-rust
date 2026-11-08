@@ -1,3 +1,11 @@
+In development
+==============
+
+- Fix `import cloudpickle_rust` with `python -OO` (or `PYTHONOPTIMIZE=2`),
+  which raised `TypeError: 'None' is not an instance of 'str'` in 0.3.0.
+  Like upstream's, the functions and methods of the module then have no
+  docstring, and neither does the module.
+
 0.3.0
 =====
 

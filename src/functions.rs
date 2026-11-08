@@ -75,8 +75,9 @@ fn python_literal(s: &str) -> String {
 
 /// The docstring of a function whose docstring literal has the value `raw`,
 /// as the running Python compiler produces it (Python 3.13 and later strip
-/// the indentation of docstrings).
-pub(crate) fn compiled_doc(py: Python<'_>, raw: &str) -> PyResult<String> {
+/// the indentation of docstrings): `None` when the compiler removes the
+/// docstrings (`python -OO`), as for upstream's functions.
+pub(crate) fn compiled_doc(py: Python<'_>, raw: &str) -> PyResult<Option<String>> {
     let source = format!("def f():\n    {}\n", python_literal(raw));
     let namespace = PyDict::new(py);
     py.run(
