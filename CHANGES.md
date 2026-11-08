@@ -1,6 +1,12 @@
 In development
 ==============
 
+- Support CPython 3.15 and the free-threaded 3.15t (with PyO3 0.29), for
+  which wheels are built: as on the other versions, every test of the
+  test-suite has the same outcome as with upstream cloudpickle. The
+  free-threaded CPython 3.13t, where free-threading is experimental, is not
+  supported anymore: PyO3 0.29 supports free-threading from Python 3.14 on.
+
 - Fix `import cloudpickle_rust` with `python -OO` (or `PYTHONOPTIMIZE=2`),
   which raised `TypeError: 'None' is not an instance of 'str'` in 0.3.0.
   Like upstream's, the functions and methods of the module then have no
