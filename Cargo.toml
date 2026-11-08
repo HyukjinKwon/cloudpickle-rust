@@ -17,10 +17,10 @@ name = "cloudpickle_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.28.3"
+pyo3 = "0.29.3"
 
 [build-dependencies]
-pyo3-build-config = "0.28.3"
+pyo3-build-config = "0.29.3"
 
 [profile.release]
 lto = "fat"

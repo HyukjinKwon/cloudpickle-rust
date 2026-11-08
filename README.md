@@ -43,20 +43,20 @@ The latest release of `cloudpickle-rust` is available from
 
 Binary wheels are provided for:
 
-| Platform | CPython 3.8 – 3.14 | Free-threaded CPython 3.14t | PyPy 3.11 (7.3, 8.0) |
+| Platform | CPython 3.8 – 3.15 | Free-threaded CPython 3.14t, 3.15t | PyPy 3.11 (7.3, 8.0) |
 |---|---|---|---|
 | Linux, manylinux (x86_64, aarch64) | ✓ | ✓ | ✓ (PyPy 8.0: manylinux_2_28) |
-| Linux, manylinux (x86) | 3.9 – 3.14 | ✓ | |
+| Linux, manylinux (x86) | 3.9 – 3.15 | ✓ | |
 | Linux, manylinux (armv7, s390x, ppc64le) | ✓ | ✓ | |
 | Linux, musllinux (x86_64, x86, aarch64, armv7) | ✓ | ✓ | |
 | macOS (x86_64, arm64) | ✓ | ✓ | ✓ |
 | Windows (x64) | ✓ | ✓ | |
 | Windows (x86) | ✓ | | |
-| Windows (arm64) | 3.11 – 3.14 | ✓ | |
+| Windows (arm64) | 3.11 – 3.15 | ✓ | |
 
-On other platforms (and on the free-threaded CPython 3.13t, for which maturin
-does not build wheels since free-threading is experimental in 3.13),
-installing from the source distribution requires a Rust toolchain.
+On other platforms, installing from the source distribution requires a Rust
+toolchain. The free-threaded CPython 3.13t, where free-threading is
+experimental, is not supported (by PyO3 0.29).
 
 The package is importable as `cloudpickle_rust`, so that it can be installed
 alongside `cloudpickle`. To use it as a drop-in replacement:
@@ -194,9 +194,9 @@ Compatibility with cloudpickle
   `import cloudpickle_rust as cloudpickle`, and whose pickles of
   `tests/old_pickles` (which reference the module of the reconstructors) were
   generated with cloudpickle-rust 0.1.0 by `tests/generate_old_pickles.py`.
-  On CPython 3.8 to 3.14 and
-  free-threaded 3.13t and 3.14t, every test has the same outcome (pass, skip
-  or expected failure) as with upstream cloudpickle. Additional tests compare
+  On CPython 3.8 to 3.15 and free-threaded 3.14t and 3.15t, every test has the
+  same outcome (pass, skip or expected failure) as with upstream cloudpickle.
+  Additional tests compare
   the payloads, the functions and the behavior when globals are replaced with
   upstream cloudpickle's.
 - **PyPy 3.11.** Upstream cloudpickle cannot be imported on PyPy 3.11 (PyPy
